@@ -1,0 +1,213 @@
+{
+  "communities": {
+    "0": [
+      "ch32v003_pga",
+      "handoff_ch32v003",
+      "handoff_ch32v003fun",
+      "handoff_dma_adc",
+      "initial_bom_ch32v003j4m6"
+    ],
+    "1": [
+      "handoff_mg996r",
+      "handoff_smart_servo_conversion",
+      "handoff_star_grounding"
+    ],
+    "2": [
+      "handoff_rc_low_pass_filter",
+      "initial_bom_10ohm_resistor",
+      "initial_bom_10uf_ceramic"
+    ],
+    "3": [
+      "handoff_bdr612h",
+      "handoff_deadtime_insertion",
+      "initial_bom_bdr612h"
+    ],
+    "4": [
+      "handoff_picorvd",
+      "handoff_raspberry_pi_pico"
+    ],
+    "5": [
+      "ch32v003rm_english_adc",
+      "handoff_py32f002a"
+    ],
+    "6": [
+      "handoff_integral_windup",
+      "handoff_pid_loop"
+    ],
+    "7": [
+      "initial_bom_smaj5_0a"
+    ],
+    "8": [
+      "initial_bom_50mohm_shunt"
+    ],
+    "9": [
+      "ch32v003rm_english_dma"
+    ],
+    "10": [
+      "gemini_graphify"
+    ],
+    "11": [
+      "handoff_smaj5_0a"
+    ]
+  },
+  "cohesion": {
+    "0": 0.4,
+    "1": 0.67,
+    "2": 0.67,
+    "3": 0.67,
+    "4": 1.0,
+    "5": 1.0,
+    "6": 1.0,
+    "7": 1.0,
+    "8": 1.0,
+    "9": 1.0,
+    "10": 1.0,
+    "11": 1.0
+  },
+  "gods": [
+    {
+      "id": "handoff_ch32v003",
+      "label": "CH32V003",
+      "degree": 10
+    },
+    {
+      "id": "handoff_smart_servo_conversion",
+      "label": "Smart Servo Conversion Project",
+      "degree": 3
+    },
+    {
+      "id": "handoff_rc_low_pass_filter",
+      "label": "RC Low-Pass Filter",
+      "degree": 3
+    },
+    {
+      "id": "handoff_bdr612h",
+      "label": "BDR612H",
+      "degree": 3
+    },
+    {
+      "id": "handoff_py32f002a",
+      "label": "PY32F002A",
+      "degree": 2
+    },
+    {
+      "id": "handoff_picorvd",
+      "label": "PicoRVD",
+      "degree": 2
+    },
+    {
+      "id": "handoff_pid_loop",
+      "label": "1kHz PID Loop",
+      "degree": 2
+    },
+    {
+      "id": "handoff_star_grounding",
+      "label": "Star Grounding Topology",
+      "degree": 1
+    },
+    {
+      "id": "handoff_ch32v003fun",
+      "label": "ch32v003fun",
+      "degree": 1
+    },
+    {
+      "id": "initial_bom_bdr612h",
+      "label": "BDR612H Motor Driver",
+      "degree": 1
+    }
+  ],
+  "surprises": [
+    {
+      "source": "CH32V003",
+      "target": "CH32V003J4M6 Microcontroller",
+      "source_files": [
+        "handoff.md",
+        "initial_bom.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "semantically_similar_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; semantically similar concepts with no structural link; peripheral node `CH32V003J4M6 Microcontroller` unexpectedly reaches hub `CH32V003`"
+    },
+    {
+      "source": "CH32V003",
+      "target": "Programmable Gain Amplifier",
+      "source_files": [
+        "handoff.md",
+        "CH32V003.pdf"
+      ],
+      "confidence": "INFERRED",
+      "relation": "conceptually_related_to",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 paper); connects across different repos/directories; peripheral node `Programmable Gain Amplifier` unexpectedly reaches hub `CH32V003`"
+    },
+    {
+      "source": "PY32F002A",
+      "target": "Analog-to-Digital Converter",
+      "source_files": [
+        "handoff.md",
+        "CH32V003RM-English.pdf"
+      ],
+      "confidence": "INFERRED",
+      "relation": "conceptually_related_to",
+      "why": "inferred connection - not explicitly stated in source; crosses file types (doc \u2194 paper); connects across different repos/directories"
+    },
+    {
+      "source": "BDR612H",
+      "target": "BDR612H Motor Driver",
+      "source_files": [
+        "handoff.md",
+        "initial_bom.md"
+      ],
+      "confidence": "INFERRED",
+      "relation": "semantically_similar_to",
+      "why": "inferred connection - not explicitly stated in source; connects across different repos/directories; semantically similar concepts with no structural link"
+    },
+    {
+      "source": "RC Low-Pass Filter",
+      "target": "10\u00b5F Filter Capacitor",
+      "source_files": [
+        "handoff.md",
+        "initial_bom.md"
+      ],
+      "confidence": "EXTRACTED",
+      "relation": "conceptually_related_to",
+      "why": "connects across different repos/directories"
+    }
+  ],
+  "questions": [
+    {
+      "type": "bridge_node",
+      "question": "Why does `CH32V003` connect `Community 0` to `Community 1`, `Community 2`, `Community 3`, `Community 4`, `Community 5`, `Community 6`?",
+      "why": "High betweenness centrality (0.576) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `Smart Servo Conversion Project` connect `Community 1` to `Community 0`?",
+      "why": "High betweenness centrality (0.127) - this node is a cross-community bridge."
+    },
+    {
+      "type": "bridge_node",
+      "question": "Why does `RC Low-Pass Filter` connect `Community 2` to `Community 0`?",
+      "why": "High betweenness centrality (0.127) - this node is a cross-community bridge."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 8 inferred relationships involving `CH32V003` (e.g. with `RC Low-Pass Filter` and `CH32V003J4M6 Microcontroller`) actually correct?",
+      "why": "`CH32V003` has 8 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 3 inferred relationships involving `BDR612H` (e.g. with `CH32V003` and `BDR612H Motor Driver`) actually correct?",
+      "why": "`BDR612H` has 3 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "verify_inferred",
+      "question": "Are the 2 inferred relationships involving `PY32F002A` (e.g. with `CH32V003` and `Analog-to-Digital Converter`) actually correct?",
+      "why": "`PY32F002A` has 2 INFERRED edges - model-reasoned connections that need verification."
+    },
+    {
+      "type": "isolated_nodes",
+      "question": "What connects `Star Grounding Topology`, `ch32v003fun`, `BDR612H Motor Driver` to the rest of the system?",
+      "why": "18 weakly-connected nodes found - possible documentation gaps or missing edges."
+    }
+  ]
+}
