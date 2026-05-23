@@ -1,0 +1,366 @@
+<?xml version="1.0" encoding="UTF-8" standalone="no" ?>
+<ProjectWorkspace xmlns:xsi="http://www.w3.org/2001/XMLSchema-instance" xsi:noNamespaceSchemaLocation="project_mpw.xsd">
+
+  <SchemaVersion>1.0</SchemaVersion>
+
+  <Header>### uVision Project, (C) Keil Software</Header>
+
+  <WorkspaceName>WorkSpace</WorkspaceName>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnalogWatchdog\MDK-ARM\ADC_AnalogWatchdog.uvprojx</PathAndName>
+    <NodeIsActive>1</NodeIsActive>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnyChannel_ContinuousScan_Interrupt\MDK-ARM\ADC_AnyChannel_ContinuousScan_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnyChannel_ContinuousScan_Polling\MDK-ARM\ADC_AnyChannel_ContinuousScan_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnyChannel_OneCycleScan_Interrupt\MDK-ARM\ADC_AnyChannel_OneCycleScan_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnyChannel_OneCycleScan_Polling\MDK-ARM\ADC_AnyChannel_OneCycleScan_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnyChannel_SingleConversion_Interrupt\MDK-ARM\ADC_AnyChannel_SingleConversion_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_AnyChannel_SingleConversion_Polling\MDK-ARM\ADC_AnyChannel_SingleConversion_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_EXTI_Trigger\MDK-ARM\ADC_EXTI_Trigger.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_InternalVoltageSensor\MDK-ARM\ADC_InternalVoltageSensor.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_TIM_CC_Trigger\MDK-ARM\ADC_TIM_CC_Trigger.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\ADC\ADC_TIM_TRGO_Trigger\MDK-ARM\ADC_TIM_TRGO_Trigger.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\CRC\CRC_Calculation\MDK-ARM\CRC_Calculation.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\DBG\DBG_TIM_Stop\MDK-ARM\DBG_TIM_Stop.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\EXTI\EXTI_Interrupt\MDK-ARM\EXTI_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\FLASH\FLASH_MainFlash_Erase_Program\MDK-ARM\FLASH_MainFlash_Erase_Program.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\FLASH\FLASH_MainFlash_ReadProtection\MDK-ARM\FLASH_MainFlash_ReadProtection.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\FLASH\FLASH_OptionByte_Erase_Program\MDK-ARM\FLASH_OptionByte_Erase_Program.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\FLASH\FLASH_SimulateEEPROM\MDK-ARM\FLASH_SimulateEEPROM.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\GPIO\GPIO_KEY_Input\MDK-ARM\GPIO_KEY_Input.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\GPIO\GPIO_LED_Toggle\MDK-ARM\GPIO_LED_Toggle.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\GPIO\GPIO_SWD_Remap\MDK-ARM\GPIO_SWD_Remap.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Master_EEPROM_Interrupt\MDK-ARM\I2C_Master_EEPROM_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Master_EEPROM_Polling\MDK-ARM\I2C_Master_EEPROM_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Master_Interrupt\MDK-ARM\I2C_Master_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Master_Polling\MDK-ARM\I2C_Master_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Master_SimulateWithGPIO\MDK-ARM\I2C_Master_SimulateWithGPIO.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Slave_Interrupt\MDK-ARM\I2C_Slave_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Slave_MultipleAddress\MDK-ARM\I2C_Slave_MultipleAddress.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\I2C\I2C_Slave_Polling\MDK-ARM\I2C_Slave_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\IWDG\IWDG_Interrupt\MDK-ARM\IWDG_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\IWDG\IWDG_SystemMonitor\MDK-ARM\IWDG_SystemMonitor.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_DeepStop_EXTI_Wakeup\MDK-ARM\PWR_DeepStop_EXTI_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_DeepStop_IWDG_Wakeup\MDK-ARM\PWR_DeepStop_IWDG_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_DeepStop_PVD_Wakeup\MDK-ARM\PWR_DeepStop_PVD_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_PVD_Interrupt\MDK-ARM\PWR_PVD_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_PVD_Polling\MDK-ARM\PWR_PVD_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_Sleep_WFE_Wakeup\MDK-ARM\PWR_Sleep_WFE_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_Sleep_WFI_Wakeup\MDK-ARM\PWR_Sleep_WFI_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_Stop_EXTI_Wakeup\MDK-ARM\PWR_Stop_EXTI_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_Stop_IWDG_Wakeup\MDK-ARM\PWR_Stop_IWDG_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\PWR\PWR_Stop_PVD_Wakeup\MDK-ARM\PWR_Stop_PVD_Wakeup.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\RCC\RCC_GetResetReason\MDK-ARM\RCC_GetResetReason.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\RCC\RCC_MCO\MDK-ARM\RCC_MCO.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Master_FLASH_Interrupt\MDK-ARM\SPI_Master_FLASH_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Master_FLASH_Polling\MDK-ARM\SPI_Master_FLASH_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Master_Interrupt\MDK-ARM\SPI_Master_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Master_Polling\MDK-ARM\SPI_Master_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Master_SimulateWithGPIO\MDK-ARM\SPI_Master_SimulateWithGPIO.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Slave_Interrupt\MDK-ARM\SPI_Slave_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\SPI\SPI_Slave_Polling\MDK-ARM\SPI_Slave_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM1\TIM1_OnePulseOutput\MDK-ARM\TIM1_OnePulseOutput.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM1\TIM1_PWM_6StepOutput_DeadTime_Break\MDK-ARM\TIM1_PWM_6StepOutput_DeadTime_Break.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM1\TIM1_PWM_Output\MDK-ARM\TIM1_PWM_Output.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM1\TIM1_PWM_PhaseShift\MDK-ARM\TIM1_PWM_PhaseShift.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM1\TIM1_Synchronization\MDK-ARM\TIM1_Synchronization.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM1\TIM1_TimeBase\MDK-ARM\TIM1_TimeBase.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM14\TIM14_TimeBase\MDK-ARM\TIM14_TimeBase.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM3\TIM3_Encoder\MDK-ARM\TIM3_Encoder.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM3\TIM3_Hall\MDK-ARM\TIM3_Hall.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM3\TIM3_InputCapture\MDK-ARM\TIM3_InputCapture.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM3\TIM3_PWM_InputCapture\MDK-ARM\TIM3_PWM_InputCapture.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\TIM3\TIM3_TimeBase\MDK-ARM\TIM3_TimeBase.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\UID\UID_ReadUID\MDK-ARM\UID_ReadUID.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_9BitDataCommunication\MDK-ARM\USART_9BitDataCommunication.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_Interrupt\MDK-ARM\USART_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_Polling\MDK-ARM\USART_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_ReceiverIdleFrame_Interrupt\MDK-ARM\USART_ReceiverIdleFrame_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_SimulateWithGPIO\MDK-ARM\USART_SimulateWithGPIO.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_SingleWireHalfDuplexCommunication\MDK-ARM\USART_SingleWireHalfDuplexCommunication.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_Synchronous_Interrupt\MDK-ARM\USART_Synchronous_Interrupt.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+  <project>
+    <PathAndName>.\USART\USART_Synchronous_Polling\MDK-ARM\USART_Synchronous_Polling.uvprojx</PathAndName>
+    <NodeIsCheckedInBatchBuild>1</NodeIsCheckedInBatchBuild>
+  </project>
+
+</ProjectWorkspace>

@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "ch32_test"
+		},
+		{
+			"name": "mm32_test",
+			"path": "mm32_test"
+		}
+	],
+	"settings": {}
+}
