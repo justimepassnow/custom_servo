@@ -123,20 +123,112 @@ void uart_print_int(uint32_t val) {
     uart_print(&buf[i + 1]);
 }
 
+// 1ms SysTick timekeeping variables
+volatile uint32_t ms_ticks = 0;
+void SysTick_Handler(void) {
+    ms_ticks++;
+}
+
+uint32_t millis(void) {
+    return ms_ticks;
+}
+
+// Initialize ADC1 for single-channel analog reading on PA7
+void adc_init(void) {
+    ADC_InitTypeDef  ADC_InitStruct;
+    GPIO_InitTypeDef GPIO_InitStruct;
+
+    // 1. Enable ADC1 peripheral clock
+    RCC_APB1PeriphClockCmd(RCC_APB1PERIPH_ADC1, ENABLE);
+
+    // 2. Initialize ADC1
+    ADC_StructInit(&ADC_InitStruct);
+    ADC_InitStruct.ADC_Resolution       = ADC_Resolution_12b;
+    ADC_InitStruct.ADC_Prescaler        = ADC_Prescaler_16;
+    ADC_InitStruct.ADC_Mode             = ADC_Mode_Imm;
+    ADC_InitStruct.ADC_DataAlign        = ADC_DataAlign_Right;
+    ADC_Init(ADC1, &ADC_InitStruct);
+
+    // 3. Configure sampling time for optimal precision
+    ADC_SampleTimeConfig(ADC1, ADC_SampleTime_240_5);
+
+    // 4. Configure PA7 as Analog Input (AIN)
+    RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
+    GPIO_StructInit(&GPIO_InitStruct);
+    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7;
+    GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AIN;
+    GPIO_Init(GPIOA, &GPIO_InitStruct);
+
+    // 5. Enable ADC1
+    ADC_Cmd(ADC1, ENABLE);
+}
+
+// Read an analog value on the specified ADC channel using standard AnyChannel single-conversion polling
+uint16_t adc_read(uint8_t channel) {
+    // Configure AnyChannel mode for a single-channel scan
+    ADC_AnyChannelNumCfg(ADC1, 0);
+    ADC_AnyChannelSelect(ADC1, ADC_AnyChannel_0, channel);
+    ADC_AnyChannelCmd(ADC1, ENABLE);
+
+    // Start conversion
+    ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+
+    // Wait until conversion completes (EOC flag is set)
+    while (RESET == ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC)) {
+        __ASM("nop");
+    }
+
+    // Clear flag and read result
+    ADC_ClearFlag(ADC1, ADC_FLAG_EOC);
+    uint16_t value = ADC_GetConversionValue(ADC1);
+
+    // Disable AnyChannel mode
+    ADC_AnyChannelCmd(ADC1, DISABLE);
+
+    return value;
+}
+
+// Prints the measured ADC voltage to serial in millivolts/volts (without float printf bloat)
+void print_voltage(uint16_t adc_val) {
+    uint32_t mv = ((uint32_t)adc_val * 3300) / 4095;
+    uint32_t v = mv / 1000;
+    uint32_t frac = mv % 1000;
+    uint32_t duty_pct = ((uint32_t)adc_val * 100) / 4095;
+    
+    uart_print("[ADC] PA7 Raw: ");
+    uart_print_int(adc_val);
+    uart_print(" | Voltage: ");
+    uart_print_int(v);
+    uart_print(".");
+    if (frac < 10) {
+        uart_print("00");
+    } else if (frac < 100) {
+        uart_print("0");
+    }
+    uart_print_int(frac);
+    uart_print(" V | LED Brightness: ");
+    uart_print_int(duty_pct);
+    uart_print("%\n");
+}
+
 int main(void) {
     GPIO_InitTypeDef        GPIO_InitStruct;
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStruct;
     TIM_OCInitTypeDef       TIM_OCInitStruct;
 
-    // 1. Initialize USART1 at 115200 Baud for debug logging and input
-    uart_init();
-    uart_print("\n--- MM32G0001 2kHz Serial PWM Controller ---\n");
+    // 1. Configure SysTick for 1ms tick interrupts (48MHz CPU clock)
+    SysTick_Config(48000000U / 1000);
 
-    // 2. Enable Peripheral Clocks for TIM1 and GPIOA
+    // 2. Initialize USART1 at 115200 Baud for debug logging and input
+    uart_init();
+    uart_print("\n--- MM32G0001 Analog-Controlled PWM Dimmer ---\n");
+
+    // 3. Enable Peripheral Clocks for TIM1 and GPIOA
     RCC_APB1PeriphClockCmd(RCC_APB1PERIPH_TIM1, ENABLE);
     RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
 
-    // 3. Calculate Timer Period for 2kHz frequency
+    // 4. Calculate Timer Period for 2kHz frequency
     uint32_t TimerClock = TIM_GetTIMxClock(TIM1);
     uint32_t TargetFrequency = 2000; // 2kHz
     uint32_t TimerPeriod = (TimerClock / TargetFrequency) - 1;
@@ -149,7 +241,7 @@ int main(void) {
     uart_print_int(TimerPeriod);
     uart_print("\n");
 
-    // 4. Initialize TIM1 Time Base
+    // 5. Initialize TIM1 Time Base
     TIM_TimeBaseStructInit(&TIM_TimeBaseStruct);
     TIM_TimeBaseStruct.TIM_Prescaler         = 0;
     TIM_TimeBaseStruct.TIM_CounterMode       = TIM_CounterMode_Up;
@@ -158,40 +250,45 @@ int main(void) {
     TIM_TimeBaseStruct.TIM_RepetitionCounter = 0;
     TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStruct);
 
-    // 5. Initialize TIM1 Channel 3 Output Compare (PWM1 mode)
+    // 6. Initialize TIM1 Channel 3 Output Compare (PWM1 mode)
     TIM_OCStructInit(&TIM_OCInitStruct);
     TIM_OCInitStruct.TIM_OCMode       = TIM_OCMode_PWM1;
     TIM_OCInitStruct.TIM_OutputState  = TIM_OutputState_Enable;
-    TIM_OCInitStruct.TIM_Pulse        = (50 * TimerPeriod) / 100; // Start at 50% duty cycle
+    TIM_OCInitStruct.TIM_Pulse        = 0; // Start at 0% duty cycle
     TIM_OCInitStruct.TIM_OCPolarity   = TIM_OCPolarity_High;
     TIM_OCInitStruct.TIM_OCIdleState  = TIM_OCIdleState_Set;
     TIM_OC3Init(TIM1, &TIM_OCInitStruct);
 
-    // 6. Configure PA6 AF4 pin mapping to TIM1_CH3 (Heartbeat LED on MM32 MiniBoard)
+    // 7. Configure PA6 AF4 pin mapping to TIM1_CH3 (Heartbeat LED on MM32 MiniBoard)
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource6, GPIO_AF_4);
 
-    // 7. Initialize PA6 as Alternate Function Push-Pull
+    // 8. Initialize PA6 as Alternate Function Push-Pull
     GPIO_StructInit(&GPIO_InitStruct);
     GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_6;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AF_PP;
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // 7b. Initialize PA5 as Input Pull-Up for physical Software Reset Button
+    // 9. Initialize PA5 as Input Pull-Up for physical Software Reset Button
     GPIO_StructInit(&GPIO_InitStruct);
     GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_5;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IPU; // Input Pull-Up
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // 8. Enable TIM1 and its Main PWM Outputs (required for advanced timers)
+    // 10. Initialize ADC1 Channel 7 on PA7
+    adc_init();
+
+    // 11. Enable TIM1 and its Main PWM Outputs (required for advanced timers)
     TIM_Cmd(TIM1, ENABLE);
     TIM_CtrlPWMOutputs(TIM1, ENABLE);
 
     uart_print("TIM1 Channel 3 PWM Initialization Complete on PA6.\n");
     uart_print("Software Reset Button active on PA5 (ground to reset).\n");
-    uart_print("Ready! Enter a duty cycle percentage (0-100) and press Enter:\n\n");
-    uart_print("> ");
+    uart_print("ADC1 Channel 7 active on PA7.\n");
+    uart_print("LED brightness is now continuously controlled by PA7 analog voltage!\n\n");
+
+    static uint32_t last_adc_print = 0;
 
     while (1) {
         // A. Check if the physical reset button on PA5 is pressed (reads LOW/RESET)
@@ -201,54 +298,20 @@ int main(void) {
             NVIC_SystemReset(); // Call CMSIS Standard System Reset
         }
 
-        // B. Poll for serial RX data
-        if (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) != RESET) {
-            char c = (char)USART_ReceiveData(USART1);
-            
-            // Handle carriage return or newline to trigger command processing
-            if (c == '\r' || c == '\n') {
-                if (rx_idx > 0) {
-                    rx_buf[rx_idx] = '\0';
-                    
-                    // Parse integer from text
-                    int32_t val = 0;
-                    for (int i = 0; rx_buf[i] != '\0'; i++) {
-                        if (rx_buf[i] >= '0' && rx_buf[i] <= '9') {
-                            val = val * 10 + (rx_buf[i] - '0');
-                        }
-                    }
-                    
-                    // Enforce range: 0% to 100%
-                    if (val < 0) val = 0;
-                    if (val > 100) val = 100;
-                    
-                    // Update pulse width (CCR3)
-                    uint32_t pulse = (val * TimerPeriod) / 100;
-                    TIM_SetCompare3(TIM1, pulse);
-                    
-                    uart_print("\nSet LED Duty Cycle to: ");
-                    uart_print_int(val);
-                    uart_print("% (Pulse: ");
-                    uart_print_int(pulse);
-                    uart_print(")\n\n> ");
-                    
-                    rx_idx = 0;
-                }
-            } 
-            // Handle Backspace (ASCII 8 or 127)
-            else if (c == 8 || c == 127) {
-                if (rx_idx > 0) {
-                    rx_idx--;
-                    uart_print("\b \b"); // Clear char on terminal screen
-                }
-            } 
-            // Save normal characters to buffer and echo back
-            else {
-                if (rx_idx < BUF_SIZE - 1) {
-                    rx_buf[rx_idx++] = c;
-                    uart_putchar(c); // Echo character
-                }
-            }
+        // B. Read raw analog value from PA7 (0-4095)
+        uint16_t raw_val = adc_read(ADC_Channel_7);
+
+        // C. Map raw 12-bit value to Timer Period range and update TIM1 CH3 compare register
+        uint32_t pulse = ((uint32_t)raw_val * TimerPeriod) / 4095;
+        TIM_SetCompare3(TIM1, pulse);
+
+        // D. Periodic ADC Reading and Printing (every 1 second, non-blocking)
+        if (millis() - last_adc_print >= 1000) {
+            last_adc_print = millis();
+            print_voltage(raw_val);
         }
+
+        // E. Tiny stabilization delay to optimize loop frequency
+        delay_ms(5);
     }
 }
