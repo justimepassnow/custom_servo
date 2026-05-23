@@ -1,69 +1,86 @@
+#include "mm32_device.h"
 #include <stdint.h>
 
-// 1. Force the HSI clock ON before any peripheral init
-void __wrap_SystemInit(void) {
-    // RCC_CR is at offset 0x00
-    // Enable HSI (Bit 0)
-    *(volatile uint32_t *)(0x40021000U + 0x00U) |= (1U << 0U); 
-    // Wait for HSI ready (Bit 1)
-    while(!(*(volatile uint32_t *)(0x40021000U + 0x00U) & (1U << 1U)));
+uint32_t SystemCoreClock = 8000000U; // Initialized to default 8MHz
+
+// Configure system clock to run CPU at full 48MHz (peripherals at safe 24MHz limit)
+void SystemInit(void) {
+    // 1. Enable HSI
+    RCC->CR |= RCC_CR_HSION;
+    
+    // 2. Wait until HSI is stable and ready
+    while (!(RCC->CR & RCC_CR_HSIRDY)) {
+    }
+    
+    // 3. Configure Flash Latency to 1 wait state (0x2) and enable Prefetch
+    // This is mandatory when running the CPU core at 48MHz
+    FLASH->ACR &= ~FLASH_ACR_LATENCY_Msk;
+    FLASH->ACR |= FLASH_ACR_LATENCY_1;  // Set 1 Wait State
+    FLASH->ACR |= FLASH_ACR_PRFTBE;     // Enable prefetch buffer
+    
+    // 4. Set AHB prescaler to DIV1 (HCLK = SYSCLK = 48MHz CPU clock)
+    RCC->CFGR &= ~RCC_CFGR_HPRE_Msk;
+    RCC->CFGR |= (0x00U << RCC_CFGR_HPRE_Pos); // HPRE = DIV1
+    
+    // 5. Set APB1 prescaler to DIV2 (PCLK1 = HCLK / 2 = 24MHz peripheral clock)
+    // Runs the USART peripheral safely within its 24MHz maximum hardware limit
+    RCC->CFGR &= ~RCC_CFGR_PPRE1_Msk;
+    RCC->CFGR |= (0x04U << RCC_CFGR_PPRE1_Pos); // PPRE1 = DIV2
+    
+    // 6. Switch System Clock Source to HSI (48MHz direct clock)
+    RCC->CFGR &= ~RCC_CFGR_SW_Msk;
+    RCC->CFGR |= (0x02U << RCC_CFGR_SW_Pos); // Select HSI
+    
+    // 7. Wait until HSI is successfully selected as the system clock source
+    while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != (0x02U << RCC_CFGR_SWS_Pos)) {
+        __ASM("nop");
+    }
+    
+    // 8. Update global clock variable to 48MHz
+    SystemCoreClock = 48000000U;
 }
 
-// RCC Registers
-#define RCC_AHBENR         (*(volatile uint32_t *)(0x40021000U + 0x14U))
-#define RCC_APB1ENR        (*(volatile uint32_t *)(0x40021000U + 0x1CU))
-
-// GPIOA Registers
-#define GPIOA_CRL          (*(volatile uint32_t *)(0x48000000U + 0x00U))
-#define GPIOA_CRH          (*(volatile uint32_t *)(0x48000000U + 0x04U))
-#define GPIOA_BSRR         (*(volatile uint32_t *)(0x48000000U + 0x10U))
-#define GPIOA_AFRH         (*(volatile uint32_t *)(0x48000000U + 0x24U))
-
-// USART1 Registers
-#define USART1_SR          (*(volatile uint32_t *)(0x40013800U + 0x00U))
-#define USART1_DR          (*(volatile uint32_t *)(0x40013800U + 0x04U))
-#define USART1_BRR         (*(volatile uint32_t *)(0x40013800U + 0x08U))
-#define USART1_CR1         (*(volatile uint32_t *)(0x40013800U + 0x0CU))
-
 void delay(void) {
-    for(volatile int i=0; i<500000; i++);
+    // Calibrated delay loop for 48MHz CPU clock
+    for(volatile int i=0; i<3000000; i++);
 }
 
 void uart_init(void) {
-    // 1. Enable GPIOA Clock (Bit 17) in RCC_AHBENR
-    RCC_AHBENR |= (1U << 17U);
+    // 1. Enable GPIOA Clock in RCC_AHBENR
+    RCC->AHBENR |= RCC_AHBENR_GPIOA;
 
-    // 2. Enable USART1 Clock (Bit 16) in RCC_APB1ENR
-    RCC_APB1ENR |= (1U << 16U);
+    // 2. Enable USART1 Clock in RCC_APB1ENR
+    RCC->APB1ENR |= RCC_APB1ENR_USART1;
 
     // 3. Configure PA12 (TX) in GPIOA_CRH (Bits 16-19)
     // Clear CNF12 and MODE12
-    GPIOA_CRH &= ~(0xFU << 16U);
+    GPIOA->CRH &= ~(0xFU << 16U);
     // Set to Alternate Function Output Push-Pull (value 0x9: CNF=2 (AF push-pull), MODE=1 (10MHz speed))
-    GPIOA_CRH |= (0x9U << 16U);
+    GPIOA->CRH |= (0x9U << 16U);
 
     // 4. Configure AFR12 in GPIOA_AFRH (Bits 16-19) to AF1 (value 0x1)
-    GPIOA_AFRH &= ~(0xFU << 16U);
-    GPIOA_AFRH |= (0x1U << 16U);
+    GPIOA->AFRH &= ~(0xFU << 16U);
+    GPIOA->AFRH |= (0x1U << 16U);
 
-    // 5. Configure Baud Rate to 9600 assuming 8MHz peripheral clock
-    // USARTDIV = 8000000 / (16 * 9600) = 52.0833
-    // Mantissa = 52 = 0x34, Fraction = 0.0833 * 16 = 1.33 \approx 1
+    // 5. Configure Baud Rate to 115200 assuming 24MHz peripheral clock (APB1 divided by 2)
+    // USARTDIV = 24000000 / (16 * 115200) = 13.0208
+    // Mantissa = 13 = 0x0D, Fraction = 0.0208 * 16 = 0.33 \approx 0
     // Write (Mantissa << 4) | (Fraction & 0xF)
-    USART1_BRR = (52U << 4U) | 1U;
+    USART1->BRR = (13U << 4U) | 0U;
 
-    // 6. Enable USART (UE, Bit 13) and Transmitter (TE, Bit 3) in CR1
-    USART1_CR1 = (1U << 13U) | (1U << 3U);
+    // 6. Enable USART (UE) and Transmitter (TE) in USART1_CR1
+    USART1->CR1 = USART_CR1_UE | USART_CR1_TE;
 }
 
 void uart_putchar(char c) {
-    // Wait until TXE (Transmit data register empty, Bit 7) is set
-    while (!(USART1_SR & (1U << 7U)));
-    // Write character
-    USART1_DR = (uint32_t)c;
+    // Wait until TXE (Transmit data register empty) is set
+    while (!(USART1->SR & USART_SR_TXE));
+    // Write character to USART data register
+    USART1->DR = (uint32_t)c;
 }
 
 void uart_print(const char *str) {
+    // Print each character in the string
     while (*str) {
         if (*str == '\n') {
             uart_putchar('\r');
@@ -77,19 +94,19 @@ int main(void) {
     uart_init();
 
     // Set PA6 (bits 24-27) as Output for blinking LED
-    GPIOA_CRL &= ~(0xFU << 24U);
-    GPIOA_CRL |= (0x1U << 24U);
+    GPIOA->CRL &= ~(0xFU << 24U);
+    GPIOA->CRL |= (0x1U << 24U);
 
-    uart_print("MM32G0001 Boot Successful!\n");
+    uart_print("MM32G0001 Native Boot Successful at 48MHz CPU (115200 Baud)!\n");
 
     while (1) {
-        // LED ON
-        GPIOA_BSRR = (1U << 6U);
+        // LED ON (using bit 6 of Port A set register)
+        GPIOA->BSRR = (1U << 6U);
         uart_print("LED ON\n");
         delay();
 
-        // LED OFF
-        GPIOA_BSRR = (1U << 22U);
+        // LED OFF (using bit 22 of Port A reset register, which corresponds to bit 6)
+        GPIOA->BSRR = (1U << 22U);
         uart_print("LED OFF\n");
         delay();
     }
