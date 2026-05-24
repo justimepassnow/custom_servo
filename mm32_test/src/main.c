@@ -2,27 +2,51 @@
 #include <stdint.h>
 #include <stdio.h>
 
-#define BUF_SIZE 16
-
+#define BUF_SIZE 32
 #define ANGLE_MIN 45
 #define ANGLE_MAX 280
+#define PID_INTERVAL_MS 1
+#define INTEGRAL_LIMIT_Q8 25600 // ~100 degrees max windup limit in Q8
+#define DEADBAND_Q8 384         // 1.5 degrees deadband in Q8
 
-uint32_t SystemCoreClock = 8000000U; // Initialized to default 8MHz
+// Logging Configuration (Set to 0 for silent multi-servo production daisy-chaining)
+#define DEBUG_LOG 1
 
-// PID target and feedback
-volatile int32_t target_angle = 150; // default target to center (150 degrees)
-volatile int32_t current_angle = 0;
-volatile uint8_t status_reporting_enabled = 0;
+// Protocol packet parsing states
+typedef enum {
+    RX_STATE_HEADER1 = 0,
+    RX_STATE_HEADER2,
+    RX_STATE_ID,
+    RX_STATE_LENGTH,
+    RX_STATE_INSTRUCTION,
+    RX_STATE_PARAMETERS,
+    RX_STATE_CHECKSUM
+} RxState;
 
-// PID parameters (default tuning, float representation for serial parser only)
-float Kp = 100.0f;
-float Ki = 0.05f;
-float Kd = 8.0f;
+// Configuration structure matching implementation specification (26 bytes)
+typedef struct __attribute__((packed)) {
+    uint8_t  servo_id;        // 0-253, default: 0
+    uint8_t  direction_invert;// 0 = normal, 1 = inverted motor direction
+    uint16_t min_angle;       // minimum angle, e.g., 45
+    uint16_t max_angle;       // maximum angle, e.g., 280
+    uint16_t max_velocity;    // degrees per second, default e.g. 180
+    uint16_t current_limit;   // raw current ADC threshold (or mA threshold), default e.g. 1000
+    int32_t  kp_q16;          // PID proportional gain
+    int32_t  ki_q16;          // PID integral gain
+    int32_t  kd_q16;          // PID derivative gain
+    uint16_t hard_min_angle;  // physical degree angle at ADC = 0 (default: 0)
+    uint16_t hard_max_angle;  // physical degree angle at ADC = 4095 (default: 300)
+    uint32_t magic;           // 0xDEADBEEF Magic Word
+} ServoConfig;
 
-// PID fixed-point Q16 gains (pre-calculated for 1ms time-step)
-volatile int32_t Kp_q16 = 6553600;     // 100.0 * 65536
-volatile int32_t Ki_q16 = 3;           // 0.05 * 0.001 * 65536 (rounded)
-volatile int32_t Kd_q16 = 524288000;   // 8.0 / 0.001 * 65536
+// Global variables
+ServoConfig config;
+uint32_t SystemCoreClock = 8000000U;
+
+// PID active fixed-point gains (pre-calculated for 1ms time-step)
+volatile int32_t Kp_q16;
+volatile int32_t Ki_q16;
+volatile int32_t Kd_q16;
 
 // PID state variables (pure integer, Q8 fixed-point format)
 int32_t pid_error = 0;
@@ -30,61 +54,132 @@ int32_t prev_error = 0;
 int32_t pid_integral = 0;
 int32_t pid_derivative = 0;
 
-#define PID_INTERVAL_MS 1
-#define INTEGRAL_LIMIT_Q8 25600 // ~100 degrees max windup limit in Q8
-#define DEADBAND_Q8 384         // 1.5 degrees deadband in Q8
+// Motion target, trajectory profiling (Ghost Target) and feedback
+volatile int32_t target_angle = 150;      // default target (degrees)
+volatile int32_t ghost_angle_q8 = 150*256; // Ghost Target in Q8
+volatile int32_t current_angle = 0;       // Current physical angle
+volatile uint16_t active_velocity = 180;  // Active velocity in deg/s
+volatile uint8_t status_reporting_enabled = 0;
+
+// Safety and Fault Management flags
+volatile uint8_t overcurrent_fault = 0;
+volatile uint8_t stall_fault = 0;
+volatile uint32_t overcurrent_ms = 0;
+volatile uint8_t motor_armed = 0; // Arm on first valid CONTROL packet
+volatile int32_t zero_current_offset_adc = 0; // Startup auto-zero calibration offset
 
 void print_status(void);
+int32_t read_current_ma(void);
 
-// Configure system clock to run CPU at full 48MHz (peripherals at safe 24MHz limit)
-void SystemInit(void) {
-    // 1. Enable HSI
-    RCC->CR |= RCC_CR_HSION;
-    
-    // 2. Wait until HSI is stable and ready
-    while (!(RCC->CR & RCC_CR_HSIRDY)) {
+// Flash Erase/Write Helper Functions
+void flash_erase_page(uint32_t address) {
+    if (READ_BIT(FLASH->CR, FLASH_CR_LOCK)) {
+        WRITE_REG(FLASH->KEYR, 0x45670123);
+        WRITE_REG(FLASH->KEYR, 0xCDEF89AB);
     }
+    WRITE_REG(FLASH->SR, FLASH_SR_EOP | FLASH_SR_WRPRTERR | FLASH_SR_PGERR);
+    SET_BIT(FLASH->CR, FLASH_CR_PER);
+    WRITE_REG(FLASH->AR, address);
+    SET_BIT(FLASH->CR, FLASH_CR_STRT);
+    while (READ_BIT(FLASH->SR, FLASH_SR_BSY));
+    CLEAR_BIT(FLASH->CR, FLASH_CR_PER);
+    WRITE_REG(FLASH->SR, FLASH_SR_EOP | FLASH_SR_WRPRTERR | FLASH_SR_PGERR);
+}
+
+void flash_write_halfword(uint32_t address, uint16_t data) {
+    SET_BIT(FLASH->CR, FLASH_CR_PG);
+    *(volatile uint16_t *)address = data;
+    while (READ_BIT(FLASH->SR, FLASH_SR_BSY));
+    CLEAR_BIT(FLASH->CR, FLASH_CR_PG);
+    WRITE_REG(FLASH->SR, FLASH_SR_EOP | FLASH_SR_WRPRTERR | FLASH_SR_PGERR);
+}
+
+void flash_write_config(ServoConfig *cfg) {
+    // 1. Temporarily force motor compare registers to 0 for safety
+    TIM_SetCompare3(TIM1, 0);
+    TIM_SetCompare2(TIM1, 0);
+
+    // 2. Erase flash page 15 (last 1KB of 16KB FLASH, starting at 0x08003C00)
+    flash_erase_page(0x08003C00);
+
+    // 3. Write config struct (rounded up to write final odd byte safely if struct size changes, pure compile-time integer math)
+    uint16_t *src = (uint16_t *)cfg;
+    for (size_t i = 0; i < (sizeof(ServoConfig) + 1) / 2; i++) {
+        flash_write_halfword(0x08003C00 + i * 2, src[i]);
+    }
+
+    // 4. Re-lock Flash Memory
+    SET_BIT(FLASH->CR, FLASH_CR_LOCK);
+}
+
+void flash_load_config(ServoConfig *cfg) {
+    ServoConfig *flash_cfg = (ServoConfig *)0x08003C00;
+    if (flash_cfg->magic == 0xDEADBEEF) {
+        *cfg = *flash_cfg;
+    } else {
+        // Load default parameters
+        cfg->servo_id = 0; // Default ID is 0 as explicitly requested!
+        cfg->direction_invert = 0; // Default direction: normal (0)
+        cfg->min_angle = 45;
+        cfg->max_angle = 280;
+        cfg->max_velocity = 180; // default 180 degrees/sec
+        cfg->current_limit = 1000; // raw threshold/mA limit
+        cfg->kp_q16 = 6553600;     // Kp = 100.0 * 65536
+        cfg->ki_q16 = 3276;        // Ki = 0.05 * 65536 (unscaled)
+        cfg->kd_q16 = 524288;      // Kd = 8.0 * 65536 (unscaled)
+        cfg->hard_min_angle = 0;   // Default 0 deg at ADC = 0
+        cfg->hard_max_angle = 300; // Default 300 deg at ADC = 4095
+        cfg->magic = 0xDEADBEEF;
+
+        // Persist default config to flash
+        flash_write_config(cfg);
+    }
+
+    // Precalculate active fixed-point gains scaled for 1ms task interval (dt = 0.001s)
+    Kp_q16 = cfg->kp_q16;
+    Ki_q16 = cfg->ki_q16 / 1000; // scaled by dt (0.001)
+    if (Ki_q16 < 1 && cfg->ki_q16 > 0) Ki_q16 = 1; // prevent underflow loss if small
+    Kd_q16 = cfg->kd_q16 * 1000; // scaled by 1/dt (1000)
+}
+
+// System Init
+void SystemInit(void) {
+    RCC->CR |= RCC_CR_HSION;
+    while (!(RCC->CR & RCC_CR_HSIRDY));
     
-    // 3. Configure Flash Latency to 1 wait state (0x2) and enable Prefetch
     FLASH->ACR &= ~FLASH_ACR_LATENCY_Msk;
-    FLASH->ACR |= FLASH_ACR_LATENCY_1;  // Set 1 Wait State
-    FLASH->ACR |= FLASH_ACR_PRFTBE;     // Enable prefetch buffer
+    FLASH->ACR |= FLASH_ACR_LATENCY_1;
+    FLASH->ACR |= FLASH_ACR_PRFTBE;
     
-    // 4. Set AHB prescaler to DIV1 (HCLK = SYSCLK = 48MHz CPU clock)
     RCC->CFGR &= ~RCC_CFGR_HPRE_Msk;
-    RCC->CFGR |= (0x00U << RCC_CFGR_HPRE_Pos); // HPRE = DIV1
+    RCC->CFGR |= (0x00U << RCC_CFGR_HPRE_Pos);
     
-    // 5. Set APB1 prescaler to DIV2 (PCLK1 = HCLK / 2 = 24MHz peripheral clock)
     RCC->CFGR &= ~RCC_CFGR_PPRE1_Msk;
-    RCC->CFGR |= (0x04U << RCC_CFGR_PPRE1_Pos); // PPRE1 = DIV2
+    RCC->CFGR |= (0x04U << RCC_CFGR_PPRE1_Pos);
     
-    // 6. Switch System Clock Source to HSI (48MHz direct clock)
     RCC->CFGR &= ~RCC_CFGR_SW_Msk;
-    RCC->CFGR |= (0x02U << RCC_CFGR_SW_Pos); // Select HSI
+    RCC->CFGR |= (0x02U << RCC_CFGR_SW_Pos);
     
-    // 7. Wait until HSI is successfully selected as the system clock source
     while ((RCC->CFGR & RCC_CFGR_SWS_Msk) != (0x02U << RCC_CFGR_SWS_Pos)) {
         __ASM("nop");
     }
     
-    // 8. Update global clock variable to 48MHz
     SystemCoreClock = 48000000U;
 }
 
-// Calibrated delay loop for ms at 48MHz CPU clock
 void delay_ms(uint32_t ms) {
     for (volatile uint32_t i = 0; i < ms * 6000; i++) {
         __ASM("nop");
     }
 }
 
+// UART Half-Duplex Single-Wire Helper Functions
 void uart_enable_tx(void) {
     USART_RxCmd(USART1, DISABLE);
     USART_TxCmd(USART1, ENABLE);
 }
 
 void uart_enable_rx(void) {
-    // Wait for Transmission Complete (TC) to ensure the last byte is fully shifted out
     while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET);
     USART_TxCmd(USART1, DISABLE);
     USART_RxCmd(USART1, ENABLE);
@@ -94,52 +189,40 @@ void uart_init(void) {
     GPIO_InitTypeDef GPIO_InitStruct;
     USART_InitTypeDef USART_InitStruct;
 
-    // 1. Enable GPIOA and USART1 peripheral clocks using official HAL APIs
     RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
     RCC_APB1PeriphClockCmd(RCC_APB1PERIPH_USART1, ENABLE);
 
-    // 2. Configure PA12 as Alternate Function Open-Drain Output (Single-Wire shared pin)
     GPIO_StructInit(&GPIO_InitStruct);
     GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_12;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
-    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AF_OD; // Open-drain mode for shared line with external pull-up
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AF_OD; // Open-Drain for single-wire Shared Bus
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // 3. Configure Pin Multiplexing for PA12 to AF1 (USART1_TX)
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource12, GPIO_AF_1);
 
-    // 4. Configure USART1 with 115200 Baud, 8-N-1 format, initially in Rx mode
     USART_StructInit(&USART_InitStruct);
     USART_InitStruct.USART_BaudRate   = 115200;
     USART_InitStruct.USART_WordLength = USART_WordLength_8b;
     USART_InitStruct.USART_StopBits   = USART_StopBits_1;
     USART_InitStruct.USART_Parity     = USART_Parity_No;
-    USART_InitStruct.USART_Mode       = USART_Mode_Rx; // Initial state: Rx listening
+    USART_InitStruct.USART_Mode       = USART_Mode_Rx; // Start listening initially
     USART_Init(USART1, &USART_InitStruct);
 
-    // 5. Enable Half-Duplex selection (connects RX to TX pin internally and disables separate RX pin)
     USART_HalfDuplexCmd(USART1, ENABLE);
-
-    // 6. Enable USART1
     USART_Cmd(USART1, ENABLE);
 }
 
-// Low-level helper to write a character to USART without managing half-duplex state transitions
 void uart_putchar_raw(char c) {
-    // Wait until Transmit Data Register is Empty (TXE flag is SET)
     while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
-    // Write character using HAL transmit API
     USART_SendData(USART1, (uint16_t)c);
 }
 
-// Public API: Write a character with automatic half-duplex state transition
 void uart_putchar(char c) {
     uart_enable_tx();
     uart_putchar_raw(c);
     uart_enable_rx();
 }
 
-// Public API: Write a string with optimized single-duplex transition for the entire block
 void uart_print(const char *str) {
     uart_enable_tx();
     while (*str) {
@@ -151,7 +234,6 @@ void uart_print(const char *str) {
     uart_enable_rx();
 }
 
-// Convert an integer to a string (simple custom implementation to avoid big standard library bloat)
 void uart_print_int(uint32_t val) {
     char buf[12];
     int i = 10;
@@ -167,7 +249,22 @@ void uart_print_int(uint32_t val) {
     uart_print(&buf[i + 1]);
 }
 
-// 1ms SysTick timekeeping variables
+void uart_print_float(float val) {
+    if (val < 0.0f) {
+        uart_print("-");
+        val = -val;
+    }
+    uint32_t integer_part = (uint32_t)val;
+    uint32_t fractional_part = (uint32_t)((val - (float)integer_part) * 100.0f + 0.5f);
+    uart_print_int(integer_part);
+    uart_print(".");
+    if (fractional_part < 10) {
+        uart_print("0");
+    }
+    uart_print_int(fractional_part);
+}
+
+// 1ms SysTick interrupts
 volatile uint32_t ms_ticks = 0;
 void SysTick_Handler(void) {
     ms_ticks++;
@@ -177,7 +274,7 @@ uint32_t millis(void) {
     return ms_ticks;
 }
 
-// Initialize ADC1 for analog reading on PA7 (potentiometer) and PA2 (current sensor)
+// ADC Helper Functions
 void adc_init(void) {
     ADC_InitTypeDef  ADC_InitStruct;
     GPIO_InitTypeDef GPIO_InitStruct;
@@ -188,18 +285,18 @@ void adc_init(void) {
     // 2. Initialize ADC1
     ADC_StructInit(&ADC_InitStruct);
     ADC_InitStruct.ADC_Resolution       = ADC_Resolution_12b;
-    ADC_InitStruct.ADC_Prescaler        = ADC_Prescaler_16;
+    ADC_InitStruct.ADC_Prescaler        = ADC_Prescaler_3; // 8MHz ADC clock
     ADC_InitStruct.ADC_Mode             = ADC_Mode_Imm;
     ADC_InitStruct.ADC_DataAlign        = ADC_DataAlign_Right;
     ADC_Init(ADC1, &ADC_InitStruct);
 
-    // 3. Configure sampling time for optimal precision
-    ADC_SampleTimeConfig(ADC1, ADC_SampleTime_240_5);
+    // 3. Configure sampling time for high-speed conversions (8.5 + 12.5 = 21 cycles @ 8MHz = 2.62us)
+    ADC_SampleTimeConfig(ADC1, ADC_SampleTime_8_5);
 
     // 4. Configure PA7 and PA2 as Analog Inputs (AIN)
     RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
     GPIO_StructInit(&GPIO_InitStruct);
-    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7 | GPIO_Pin_2;
+    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7 | GPIO_Pin_2; // PA7 = Potentiometer, PA2 = Current Sensor
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AIN;
     GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -208,252 +305,431 @@ void adc_init(void) {
     ADC_Cmd(ADC1, ENABLE);
 }
 
-// Read an analog value on the specified ADC channel using standard AnyChannel single-conversion polling
 uint16_t adc_read(uint8_t channel) {
-    // Configure AnyChannel mode for a single-channel scan
     ADC_AnyChannelNumCfg(ADC1, 0);
     ADC_AnyChannelSelect(ADC1, ADC_AnyChannel_0, channel);
     ADC_AnyChannelCmd(ADC1, ENABLE);
 
-    // Start conversion
     ADC_SoftwareStartConvCmd(ADC1, ENABLE);
 
-    // Wait until conversion completes (EOC flag is set)
     while (RESET == ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC)) {
         __ASM("nop");
     }
 
-    // Clear flag and read result
     ADC_ClearFlag(ADC1, ADC_FLAG_EOC);
     uint16_t value = ADC_GetConversionValue(ADC1);
 
-    // Disable AnyChannel mode
     ADC_AnyChannelCmd(ADC1, DISABLE);
 
     return value;
 }
 
-// Read current draw in Milliamperes (mA) from INA180 current sensor on PA2 (ADC_Channel_5)
-// Shunt = 0.01 Ohms, Gain = 20
-// I (mA) = raw_adc * 16500 / 4095
 int32_t read_current_ma(void) {
-    uint16_t raw_adc = adc_read(ADC_Channel_5);
-    int32_t current_ma = ((int32_t)raw_adc * 16500) / 4095;
-    return current_ma;
-}
-
-// Absolute value function for floats
-float float_abs(float val) {
-    return (val >= 0.0f) ? val : -val;
-}
-
-// Parse a float from a string (integer part + fractional part)
-float parse_float(const char *str) {
-    float res = 0.0f;
-    float sign = 1.0f;
-    int i = 0;
-    if (str[i] == '-') {
-        sign = -1.0f;
-        i++;
+    static int32_t filtered_current_q8 = -1;
+    
+    // 1. Synchronize reading with the midpoint of the active PWM drive pulse
+    uint32_t pulse3 = TIM1->CCR3;
+    uint32_t pulse2 = TIM1->CCR2;
+    uint32_t arr = TIM1->ARR;
+    uint32_t active_pulse = 0;
+    
+    // Find active pulse width based on which channel is modulated in inverted PWM
+    if (pulse3 > 0 && pulse3 < arr) {
+        active_pulse = arr - pulse3; // Forward active drive width
+    } else if (pulse2 > 0 && pulse2 < arr) {
+        active_pulse = arr - pulse2; // Reverse active drive width
     }
-    // Integer part
-    while (str[i] >= '0' && str[i] <= '9') {
-        res = res * 10.0f + (str[i] - '0');
-        i++;
-    }
-    // Fractional part
-    if (str[i] == '.') {
-        i++;
-        float factor = 0.1f;
-        while (str[i] >= '0' && str[i] <= '9') {
-            res += (str[i] - '0') * factor;
-            factor *= 0.1f;
-            i++;
+
+    if (active_pulse > 50) { // Only sync if the drive pulse is wide enough (e.g., >50 counts)
+        // Midpoint of active drive pulse = arr_period - (active_pulse / 2)
+        uint32_t target_cnt = arr - (active_pulse / 2);
+        
+        // Wait in software until the timer counter reaches this midpoint
+        while (TIM1->CNT < target_cnt) {
+            __ASM("nop");
         }
     }
-    return res * sign;
+    
+    // 2. Perform fast analog conversion
+    uint16_t raw_adc = adc_read(ADC_Channel_5); // PA2 maps to ADC1_VIN[5]
+    
+    // Apply baseline offset calibration
+    int32_t corrected_raw = (int32_t)raw_adc - zero_current_offset_adc;
+    if (corrected_raw < 0) {
+        corrected_raw = 0; // Prevent negative current draw readings
+    }
+    
+    // Scale standard integer calculation directly to Q8 format
+    // Math: current_ma_q8 = (corrected_raw * 16500 * 256) / 4095 = (corrected_raw * 4224000) / 4095
+    // Cast to 64-bit integer before multiplying to prevent 32-bit arithmetic overflow!
+    int32_t current_ma_q8 = (int32_t)(((int64_t)corrected_raw * 4224000) / 4095);
+    
+    if (filtered_current_q8 < 0) {
+        filtered_current_q8 = current_ma_q8;
+    } else {
+        // Apply EMA filter: alpha = 0.15 -> Q8 weight is 38/256
+        filtered_current_q8 = (38 * current_ma_q8 + 218 * filtered_current_q8) >> 8;
+    }
+    
+    return filtered_current_q8 >> 8; // convert back to standard integer milliamps
 }
 
-// Custom float print utility for serial debug (without float printf bloat)
-void uart_print_float(float val) {
-    if (val < 0.0f) {
-        uart_print("-");
-        val = -val;
+// Transmit immediate status packet reply (echoing instruction)
+void send_status_reply(uint8_t echoed_instruction) {
+    uint8_t packet[11];
+    packet[0] = 0xFF;
+    packet[1] = 0xFF;
+    packet[2] = config.servo_id;
+    packet[3] = 0x07; // Length: Instruction (1) + 5 Params + Checksum (1)
+    packet[4] = echoed_instruction;
+    
+    // Param 0,1: Current Angle (LSB/MSB)
+    packet[5] = (uint8_t)(current_angle & 0xFF);
+    packet[6] = (uint8_t)((current_angle >> 8) & 0xFF);
+    
+    // Param 2,3: Current Draw (LSB/MSB)
+    int32_t current_ma = read_current_ma();
+    packet[7] = (uint8_t)(current_ma & 0xFF);
+    packet[8] = (uint8_t)((current_ma >> 8) & 0xFF);
+    
+    // Param 4: Status Flags (Bit 0: Moving, Bit 1: Over_Current, Bit 2: Stall)
+    uint8_t flags = 0;
+    if (status_reporting_enabled) {
+        flags |= (1 << 0);
     }
-    uint32_t integer_part = (uint32_t)val;
-    uint32_t fractional_part = (uint32_t)((val - (float)integer_part) * 100.0f + 0.5f); // 2 decimal places, rounded
-    uart_print_int(integer_part);
-    uart_print(".");
-    if (fractional_part < 10) {
-        uart_print("0");
+    if (overcurrent_fault) {
+        flags |= (1 << 1);
     }
-    uart_print_int(fractional_part);
+    if (stall_fault) {
+        flags |= (1 << 2);
+    }
+    packet[9] = flags;
+    
+    // Checksum: lower 8 bits of bitwise NOT of sum of ID to last parameter
+    uint8_t sum = packet[2] + packet[3] + packet[4] + packet[5] + packet[6] + packet[7] + packet[8] + packet[9];
+    packet[10] = ~sum;
+    
+    // Transmit over shared single-wire bus
+    uart_enable_tx();
+    for (int i = 0; i < 11; i++) {
+        uart_putchar_raw((char)packet[i]);
+    }
+    uart_enable_rx();
 }
 
-// Non-blocking serial parsing to update the target angle and PID gains
-void process_serial_input(void) {
-    static char rx_buf[BUF_SIZE];
-    static uint8_t rx_idx = 0;
+// Non-blocking binary packet parser
+void process_packet_input(void) {
+    static RxState rx_state = RX_STATE_HEADER1;
+    static uint8_t rx_id = 0;
+    static uint8_t rx_length = 0;
+    static uint8_t rx_instruction = 0;
+    static uint8_t rx_params[32];
+    static uint8_t rx_param_count = 0;
+    static uint8_t target_param_count = 0;
 
     if (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) != RESET) {
-        char c = (char)USART_ReceiveData(USART1);
-        
-        // Echo back the character to the user
-        if (c == '\r') {
-            uart_print("\r\n");
-        } else if (c != '\n') {
-            uart_putchar(c);
-        }
+        uint8_t c = (uint8_t)USART_ReceiveData(USART1);
 
-        if (c == '\r' || c == '\n') {
-            if (rx_idx > 0) {
-                rx_buf[rx_idx] = '\0';
-                
-                char cmd = rx_buf[0];
-                
-                // Skip leading spaces after the command letter, if any
-                int start_idx = 1;
-                while (rx_buf[start_idx] == ' ' || rx_buf[start_idx] == '\t') {
-                    start_idx++;
+        switch (rx_state) {
+            case RX_STATE_HEADER1:
+                if (c == 0xFF) {
+                    rx_state = RX_STATE_HEADER2;
                 }
-                
-                if (cmd == 'p' || cmd == 'P') {
-                    Kp = parse_float(&rx_buf[start_idx]);
-                    Kp_q16 = (int32_t)(Kp * 65536.0f);
-                    uart_print("[PID] Kp set to ");
-                    uart_print_float(Kp);
-                    uart_print("\r\n");
-                } else if (cmd == 'i' || cmd == 'I') {
-                    Ki = parse_float(&rx_buf[start_idx]);
-                    Ki_q16 = (int32_t)(Ki * 0.001f * 65536.0f); // Pre-calculate for 1ms interval
-                    uart_print("[PID] Ki set to ");
-                    uart_print_float(Ki);
-                    uart_print("\r\n");
-                } else if (cmd == 'd' || cmd == 'D') {
-                    Kd = parse_float(&rx_buf[start_idx]);
-                    Kd_q16 = (int32_t)((Kd / 0.001f) * 65536.0f); // Pre-calculate for 1ms interval
-                    uart_print("[PID] Kd set to ");
-                    uart_print_float(Kd);
-                    uart_print("\r\n");
-                } else if (cmd >= '0' && cmd <= '9') {
-                    // It's a target angle
-                    int32_t val = 0;
-                    int i = 0;
-                    while (rx_buf[i] >= '0' && rx_buf[i] <= '9') {
-                        val = val * 10 + (rx_buf[i] - '0');
-                        i++;
-                    }
-                    if (val >= ANGLE_MIN && val <= ANGLE_MAX) {
-                        target_angle = val;
-                        status_reporting_enabled = 1; // Start reporting status
-                        uart_print("[Target] Set to ");
-                        uart_print_int(target_angle);
-                        uart_print(" degrees. Tracking...\r\n");
-                    } else {
-                        uart_print("[Error] Target ");
-                        uart_print_int(val);
-                        uart_print(" out of range (");
-                        uart_print_int(ANGLE_MIN);
-                        uart_print("-");
-                        uart_print_int(ANGLE_MAX);
-                        uart_print(")\r\n");
-                    }
+                break;
+            case RX_STATE_HEADER2:
+                if (c == 0xFF) {
+                    rx_state = RX_STATE_ID;
                 } else {
-                    uart_print("[Error] Unknown command. Use P/I/D values or target angle digits.\r\n");
+                    rx_state = RX_STATE_HEADER1;
                 }
-                
-                rx_idx = 0;
-            }
-        } else if (c != '\b' && rx_idx < BUF_SIZE - 1) {
-            // Store character
-            rx_buf[rx_idx++] = c;
-        } else if (c == '\b' && rx_idx > 0) {
-            // Handle backspace
-            rx_idx--;
+                break;
+            case RX_STATE_ID:
+                if (c == config.servo_id || c == 0xFE) { // Explicit ID or Broadcast ID
+                    rx_id = c;
+                    rx_state = RX_STATE_LENGTH;
+                } else {
+                    rx_state = RX_STATE_HEADER1;
+                }
+                break;
+            case RX_STATE_LENGTH:
+                if (c >= 2 && c <= 32) {
+                    rx_length = c;
+                    rx_state = RX_STATE_INSTRUCTION;
+                } else {
+                    rx_state = RX_STATE_HEADER1;
+                }
+                break;
+            case RX_STATE_INSTRUCTION:
+                rx_instruction = c;
+                rx_param_count = 0;
+                target_param_count = rx_length - 2;
+                if (target_param_count > 0) {
+                    rx_state = RX_STATE_PARAMETERS;
+                } else {
+                    rx_state = RX_STATE_CHECKSUM;
+                }
+                break;
+            case RX_STATE_PARAMETERS:
+                rx_params[rx_param_count++] = c;
+                if (rx_param_count >= target_param_count) {
+                    rx_state = RX_STATE_CHECKSUM;
+                }
+                break;
+            case RX_STATE_CHECKSUM:
+                {
+                    uint8_t rx_checksum = c;
+                    uint8_t sum = rx_id + rx_length + rx_instruction;
+                    for (uint8_t i = 0; i < target_param_count; i++) {
+                        sum += rx_params[i];
+                    }
+                    uint8_t calculated_checksum = ~sum;
+
+                    if (calculated_checksum == rx_checksum) {
+                        // 1. CONTROL Command
+                        if (rx_instruction == 0x01) {
+                            if (!overcurrent_fault && !stall_fault) {
+                                uint16_t cmd_angle = rx_params[0] | (rx_params[1] << 8);
+                                uint16_t cmd_velocity = rx_params[2] | (rx_params[3] << 8);
+                                
+                                if (cmd_angle < config.min_angle) cmd_angle = config.min_angle;
+                                if (cmd_angle > config.max_angle) cmd_angle = config.max_angle;
+                                
+                                target_angle = cmd_angle;
+                                active_velocity = (cmd_velocity == 0) ? config.max_velocity : cmd_velocity;
+                                status_reporting_enabled = 1;
+                                motor_armed = 1; // Arm motor upon first valid CONTROL command!
+                            }
+                            if (rx_id != 0xFE) {
+                                send_status_reply(0x01);
+                            }
+                        } 
+                        // 2. CONFIG Command
+                        else if (rx_instruction == 0x02) {
+                            uint8_t update_mask = rx_params[0];
+                            ServoConfig new_cfg = config;
+                            
+                            if (update_mask & (1 << 0)) {
+                                new_cfg.servo_id = rx_params[1] & 0x7F; // Extract 7-bit ID
+                                new_cfg.direction_invert = (rx_params[1] >> 7) & 0x01; // Extract MSB as direction invert flag
+                            }
+                            if (update_mask & (1 << 1)) {
+                                new_cfg.min_angle = rx_params[2] | (rx_params[3] << 8);
+                                new_cfg.max_angle = rx_params[4] | (rx_params[5] << 8);
+                            }
+                            if (update_mask & (1 << 2)) {
+                                new_cfg.max_velocity = rx_params[6] | (rx_params[7] << 8);
+                            }
+                            if (update_mask & (1 << 3)) {
+                                new_cfg.current_limit = rx_params[8] | (rx_params[9] << 8);
+                            }
+                            if (update_mask & (1 << 4)) {
+                                new_cfg.kp_q16 = rx_params[10] | (rx_params[11] << 8) | (rx_params[12] << 16) | (rx_params[13] << 24);
+                                new_cfg.ki_q16 = rx_params[14] | (rx_params[15] << 8) | (rx_params[16] << 16) | (rx_params[17] << 24);
+                                new_cfg.kd_q16 = rx_params[18] | (rx_params[19] << 8) | (rx_params[20] << 16) | (rx_params[21] << 24);
+                            }
+                            if (update_mask & (1 << 5)) {
+                                new_cfg.hard_min_angle = rx_params[22] | (rx_params[23] << 8);
+                                new_cfg.hard_max_angle = rx_params[24] | (rx_params[25] << 8);
+                            }
+                            
+                            flash_write_config(&new_cfg);
+                            config = new_cfg;
+                            Kp_q16 = config.kp_q16;
+                            Ki_q16 = config.ki_q16 / 1000;
+                            if (Ki_q16 < 1 && config.ki_q16 > 0) Ki_q16 = 1;
+                            Kd_q16 = config.kd_q16 * 1000;
+                            
+                            if (rx_id != 0xFE) {
+                                send_status_reply(0x02);
+                            }
+                        } 
+                        // 3. POLL_STATUS Command
+                        else if (rx_instruction == 0x03) {
+                            if (rx_id != 0xFE) {
+                                send_status_reply(0x03);
+                            }
+                        } 
+                        // 4. CLEAR_ERROR Command
+                        else if (rx_instruction == 0x04) {
+                            overcurrent_fault = 0;
+                            stall_fault = 0;
+                            overcurrent_ms = 0;
+                            pid_integral = 0;
+                            prev_error = 0;
+                            target_angle = current_angle;
+                            ghost_angle_q8 = current_angle << 8;
+                            
+                            if (rx_id != 0xFE) {
+                                send_status_reply(0x04);
+                            }
+                        }
+                    }
+                    rx_state = RX_STATE_HEADER1;
+                }
+                break;
         }
     }
 }
 
-// PID controller update function (called every 1ms, Q16/Q8 integer control math)
+// PID Controller Loop
 void pid_update(uint32_t arr_period) {
-    // Low-pass filter state in Q8 (256 scale factor)
-    static int32_t filtered_adc_q8 = -1;
-
-    // 1. Read potentiometer ADC and apply exponential moving average filter in Q8
-    uint16_t raw_adc = adc_read(ADC_Channel_7);
-    if (filtered_adc_q8 < 0) {
-        filtered_adc_q8 = ((int32_t)raw_adc) << 8; // initialize
-    } else {
-        // alpha = 0.10 -> Q8 equivalent is 26/256
-        // Pre-scale raw_adc to Q8, multiply, and shift right back to Q8 scale
-        filtered_adc_q8 = (26 * (((int32_t)raw_adc) << 8) + 230 * filtered_adc_q8) >> 8;
-    }
-
-    // 2. Map filtered ADC to float physical angle (the ONLY float variable allowed)
-    float current_angle_f = ((float)(filtered_adc_q8 >> 8) * 300.0f) / 4095.0f;
-    
-    // Update global integer angle for printing/display (convert float back to integer)
-    current_angle = (int32_t)(current_angle_f + 0.5f);
-
-    // 3. Compute error as Q8 integer (scaling float error by 256)
-    pid_error = (int32_t)(((float)target_angle - current_angle_f) * 256.0f);
-
-    // 4. Check deadband in Q8
-    int32_t abs_error = (pid_error >= 0) ? pid_error : -pid_error;
-    if (abs_error < DEADBAND_Q8) {
-        // Within deadband: hold motor completely still
-        TIM_SetCompare3(TIM1, 0); // PA6 low
-        TIM_SetCompare2(TIM1, 0); // PA8 low
-        pid_integral = 0;         // Reset integral term
-        prev_error = 0;
-        if (status_reporting_enabled) {
-            status_reporting_enabled = 0;
-            print_status(); // Print final target reached state
-            uart_print("[STATUS] Target reached! Motor is now idle.\r\n");
-        }
+    if (overcurrent_fault || stall_fault) {
+        TIM_SetCompare3(TIM1, 0);
+        TIM_SetCompare2(TIM1, 0);
         return;
     }
 
-    // 5. Calculate P, I, D terms in Q24 format using 64-bit integers to prevent 32-bit overflow
+    if (!motor_armed) {
+        TIM_SetCompare3(TIM1, 0);
+        TIM_SetCompare2(TIM1, 0);
+        return;
+    }
+
+    static int32_t filtered_adc_q8 = -1;
+
+    // 1. Read potentiometer raw ADC and apply low pass filter
+    uint16_t raw_adc = adc_read(ADC_Channel_7);
+    if (filtered_adc_q8 < 0) {
+        filtered_adc_q8 = ((int32_t)raw_adc) << 8;
+    } else {
+        // alpha = 0.10 -> Q8 equivalent is 26/256
+        filtered_adc_q8 = (26 * (((int32_t)raw_adc) << 8) + 230 * filtered_adc_q8) >> 8;
+    }
+
+    // 2. Convert to Q8 angle using high-precision linear interpolation of hard calibration limits
+    // Retains all 8 bits of fractional filtering smoothness from filtered_adc_q8!
+    int32_t sweep = config.hard_max_angle - config.hard_min_angle;
+    int32_t current_angle_q8 = (sweep * filtered_adc_q8) / 4095 + (config.hard_min_angle << 8);
+    
+    // Update global degree angle (round Q8 to integer)
+    current_angle = (current_angle_q8 + 128) >> 8;
+
+    // 3. Compute error relative to the Ghost Target
+    pid_error = ghost_angle_q8 - current_angle_q8;
+
+    // 4. Check Deadband (only when Ghost Target has fully caught up to final target)
+    if (ghost_angle_q8 == (target_angle << 8)) {
+        int32_t abs_error = (pid_error >= 0) ? pid_error : -pid_error;
+        if (abs_error < DEADBAND_Q8) {
+            // Idle state: hold both inputs HIGH (100% duty) for active braking/slow decay
+            TIM_SetCompare3(TIM1, arr_period);
+            TIM_SetCompare2(TIM1, arr_period);
+            pid_integral = 0;
+            prev_error = 0;
+            if (status_reporting_enabled) {
+                status_reporting_enabled = 0;
+#if DEBUG_LOG
+                print_status();
+                uart_print("[STATUS] Target reached! Motor is now idle.\r\n");
+#endif
+            }
+            return;
+        }
+    }
+
+    // 5. Calculate P, I, D outputs using Q24 scaling
     int64_t p_term = (int64_t)Kp_q16 * (int64_t)pid_error;
 
-    // Accumulate integral in Q8 (Ki_q16 is pre-scaled by dt = 0.001s)
     pid_integral += pid_error;
     if (pid_integral > INTEGRAL_LIMIT_Q8) pid_integral = INTEGRAL_LIMIT_Q8;
     else if (pid_integral < -INTEGRAL_LIMIT_Q8) pid_integral = -INTEGRAL_LIMIT_Q8;
     
     int64_t i_term = (int64_t)Ki_q16 * (int64_t)pid_integral;
 
-    // Calculate derivative term (Kd_q16 is pre-scaled by 1/dt = 1000)
     pid_derivative = pid_error - prev_error;
     prev_error = pid_error;
     
     int64_t d_term = (int64_t)Kd_q16 * (int64_t)pid_derivative;
 
-    // Sum all terms in Q24 format using 64-bit integer
     int64_t pid_out_q24 = p_term + i_term + d_term;
-
-    // Scale output back to standard integer timer range (divide Q24 by 2^24)
     int32_t pid_out = (int32_t)(pid_out_q24 >> 24);
 
-    // 6. Output to PWM channels based on direction
+    // 6. Direct PWM generation
     int32_t pulse = (pid_out >= 0) ? pid_out : -pid_out;
     if (pulse > (int32_t)arr_period) {
-        pulse = (int32_t)arr_period; // clamp to 100% duty cycle
+        pulse = (int32_t)arr_period;
     }
 
-    if (pid_out > 0) {
-        // Direction A (Forward): PWM on Channel 3, LOW on Channel 2
-        TIM_SetCompare3(TIM1, pulse);
-        TIM_SetCompare2(TIM1, 0);
+    int8_t drive_direction = (pid_out >= 0) ? 1 : -1;
+    if (config.direction_invert) {
+        drive_direction = -drive_direction; // Swap effective direction
+    }
+
+    if (drive_direction > 0) {
+        // Forward Direction (IN1 [CH3] = 100% High, IN2 [CH2] = Inverted PWM)
+        TIM_SetCompare3(TIM1, arr_period);
+        TIM_SetCompare2(TIM1, arr_period - pulse);
     } else {
-        // Direction B (Backward): LOW on Channel 3, PWM on Channel 2
-        TIM_SetCompare3(TIM1, 0);
-        TIM_SetCompare2(TIM1, pulse);
+        // Backward Direction (IN1 [CH3] = Inverted PWM, IN2 [CH2] = 100% High)
+        TIM_SetCompare3(TIM1, arr_period - pulse);
+        TIM_SetCompare2(TIM1, arr_period);
     }
 }
 
-// Prints the measured and target values (without float printf bloat)
+// 1ms Critical Task Loop (Trajectory Ramping & Protection Checks)
+void one_ms_task(uint32_t arr_period) {
+    // 1. Trajectory Profiling (Velocity control of Ghost Target)
+    int32_t target_angle_q8 = target_angle << 8;
+    int32_t step_q8 = ((int32_t)active_velocity * 32) / 125; // (velocity * 256) / 1000
+    if (step_q8 < 1) step_q8 = 1;
+    
+    if (ghost_angle_q8 < target_angle_q8) {
+        ghost_angle_q8 += step_q8;
+        if (ghost_angle_q8 > target_angle_q8) {
+            ghost_angle_q8 = target_angle_q8;
+        }
+    } else if (ghost_angle_q8 > target_angle_q8) {
+        ghost_angle_q8 -= step_q8;
+        if (ghost_angle_q8 < target_angle_q8) {
+            ghost_angle_q8 = target_angle_q8;
+        }
+    }
+
+    // 2. Over-Current Protection
+    int32_t current_ma = read_current_ma();
+    if (current_ma > (int32_t)config.current_limit) {
+        overcurrent_ms++;
+        if (overcurrent_ms >= 5) {
+            overcurrent_fault = 1;
+            TIM_SetCompare3(TIM1, 0);
+            TIM_SetCompare2(TIM1, 0);
+        }
+    } else {
+        overcurrent_ms = 0;
+    }
+
+    // 3. Stall Detection (evaluated once every 100ms)
+    static uint32_t last_stall_check_time = 0;
+    static int32_t last_angle_q8 = -1;
+    if (millis() - last_stall_check_time >= 100) {
+        last_stall_check_time = millis();
+        uint32_t pulse3 = TIM1->CCR3;
+        uint32_t pulse2 = TIM1->CCR2;
+        
+        if (pulse3 > 0 || pulse2 > 0) { // motor is driven
+            int32_t current_angle_q8 = current_angle << 8;
+            if (last_angle_q8 >= 0) {
+                int32_t delta = current_angle_q8 - last_angle_q8;
+                if (delta < 0) delta = -delta;
+                
+                // 2 degrees in Q8 is 512 counts
+                if (delta < 512) {
+                    stall_fault = 1;
+                    TIM_SetCompare3(TIM1, 0);
+                    TIM_SetCompare2(TIM1, 0);
+                }
+            }
+            last_angle_q8 = current_angle_q8;
+        } else {
+            last_angle_q8 = -1;
+        }
+    }
+
+    // 4. Execute PID loop
+    pid_update(arr_period);
+}
+
+// Telemetry output logger
 void print_status(void) {
     uart_print("[STATUS] Target: ");
     uart_print_int(target_angle);
@@ -461,7 +737,6 @@ void print_status(void) {
     uart_print_int(current_angle);
     uart_print(" deg | Error: ");
     
-    // Support printing negative numbers for error
     int32_t err = target_angle - current_angle;
     if (err < 0) {
         uart_print("-");
@@ -473,11 +748,11 @@ void print_status(void) {
     uart_print(" deg | Current Draw: ");
     uart_print_int(read_current_ma());
     uart_print(" mA | Duty: ");
-    // Compute current duty cycle percent of the active output channel
+    
     uint32_t pulse3 = TIM1->CCR3;
     uint32_t pulse2 = TIM1->CCR2;
     uint32_t arr = TIM1->ARR;
-    if (arr == 0) arr = 1; // avoid division by 0
+    if (arr == 0) arr = 1;
     
     if (pulse3 > 0) {
         uart_print_int((pulse3 * 100) / arr);
@@ -490,36 +765,53 @@ void print_status(void) {
     }
 }
 
+void calibrate_current_sensor(void) {
+    int32_t sum = 0;
+    // Take 16 quick sequential readings to calculate a clean average offset
+    for (int i = 0; i < 16; i++) {
+        sum += adc_read(ADC_Channel_5); // PA2 maps to ADC1_VIN[5]
+        delay_ms(1);
+    }
+    zero_current_offset_adc = sum / 16;
+    
+#if DEBUG_LOG
+    uart_print("Current Sensor Baseline Calibrated. Zero-Offset: ");
+    uart_print_int(zero_current_offset_adc);
+    uart_print(" raw ADC counts.\r\n");
+#endif
+}
+
 int main(void) {
     GPIO_InitTypeDef        GPIO_InitStruct;
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStruct;
     TIM_OCInitTypeDef       TIM_OCInitStruct;
 
-    // 1. Configure SysTick for 1ms tick interrupts (48MHz CPU clock)
+    // 1. Enable 1ms SysTick timekeeping interrupt
     SysTick_Config(48000000U / 1000);
 
-    // 2. Initialize USART1 at 115200 Baud for debug logging and input
+    // 2. Initialize Single-Wire Half-Duplex USART1 at 115200 Baud
     uart_init();
-    uart_print("\n--- MM32G0001 Analog-Controlled PWM Dimmer ---\n");
+#if DEBUG_LOG
+    uart_print("\n--- Smart Servo Overhauled Firmware Init ---\n");
+#endif
 
-    // 3. Enable Peripheral Clocks for TIM1 and GPIOA
+    // 3. Load or initialize Flash Persistent Parameters
+    flash_load_config(&config);
+#if DEBUG_LOG
+    uart_print("Flash Loaded Configuration ID: ");
+    uart_print_int(config.servo_id);
+    uart_print("\r\n");
+#endif
+
+    // 4. Initialize TIM1 and GPIOA
     RCC_APB1PeriphClockCmd(RCC_APB1PERIPH_TIM1, ENABLE);
     RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
 
-    // 4. Calculate Timer Period for 20kHz frequency
+    // 5. Configure TIM1 base for 20kHz motor PWM
     uint32_t TimerClock = TIM_GetTIMxClock(TIM1);
-    uint32_t TargetFrequency = 20000; // 20kHz
+    uint32_t TargetFrequency = 20000;
     uint32_t TimerPeriod = (TimerClock / TargetFrequency) - 1;
 
-    uart_print("Timer Peripheral Clock: ");
-    uart_print_int(TimerClock);
-    uart_print(" Hz\n");
-
-    uart_print("Calculated Timer Period (ARR): ");
-    uart_print_int(TimerPeriod);
-    uart_print("\n");
-
-    // 5. Initialize TIM1 Time Base
     TIM_TimeBaseStructInit(&TIM_TimeBaseStruct);
     TIM_TimeBaseStruct.TIM_Prescaler         = 0;
     TIM_TimeBaseStruct.TIM_CounterMode       = TIM_CounterMode_Up;
@@ -528,79 +820,84 @@ int main(void) {
     TIM_TimeBaseStruct.TIM_RepetitionCounter = 0;
     TIM_TimeBaseInit(TIM1, &TIM_TimeBaseStruct);
 
-    // 6. Initialize TIM1 Channel 3 and Channel 2 Output Compare (PWM1 mode)
+    // 6. Initialize TIM1 CH3 and CH2 output channels
     TIM_OCStructInit(&TIM_OCInitStruct);
     TIM_OCInitStruct.TIM_OCMode       = TIM_OCMode_PWM1;
     TIM_OCInitStruct.TIM_OutputState  = TIM_OutputState_Enable;
-    TIM_OCInitStruct.TIM_Pulse        = 0; // Start at 0% duty cycle
+    TIM_OCInitStruct.TIM_Pulse        = 0;
     TIM_OCInitStruct.TIM_OCPolarity   = TIM_OCPolarity_High;
     TIM_OCInitStruct.TIM_OCIdleState  = TIM_OCIdleState_Set;
     TIM_OC3Init(TIM1, &TIM_OCInitStruct); // Channel 3 (PA6)
     TIM_OC2Init(TIM1, &TIM_OCInitStruct); // Channel 2 (PA8)
 
-    // 7. Configure AF pin mappings: PA6 -> TIM1_CH3 (AF4), PA8 -> TIM1_CH2 (AF1)
+    // 7. Configure pin AF multiplexing
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource6, GPIO_AF_4);
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource8, GPIO_AF_1);
 
-    // 8. Initialize PA6 and PA8 as Alternate Function Push-Pull outputs
+    // 8. Configure Alternate Function push-pull pins for PWM channels
     GPIO_StructInit(&GPIO_InitStruct);
     GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_6 | GPIO_Pin_8;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AF_PP;
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // 9. Initialize PA5 as Input Pull-Up for physical Software Reset Button
+    // 9. Configure Software Reset button on PA5
     GPIO_StructInit(&GPIO_InitStruct);
     GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_5;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
-    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IPU; // Input Pull-Up
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IPU;
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // 10. Initialize ADC1 Channel 7 on PA7
+    // 10. Initialize ADC on PA7 and PA2
     adc_init();
 
-    // 11. Enable TIM1 and its Main PWM Outputs (required for advanced timers)
+    // Calibrate current sensor baseline offset (Auto-Zeroing)
+    calibrate_current_sensor();
+
+    // 11. Enable TIM1 Main Outputs
     TIM_Cmd(TIM1, ENABLE);
     TIM_CtrlPWMOutputs(TIM1, ENABLE);
 
-    uart_print("TIM1 PWM Channels 2 & 3 Init Complete on PA8 & PA6.\r\n");
-    uart_print("Software Reset Button active on PA5.\r\n");
-    uart_print("ADC1 Channel 7 active on PA7.\r\n");
-    uart_print("PID Motor Position Controller active! Target: 150 deg.\r\n\r\n");
+    // 12. Soft Start: read current position to lock initial target securely
+    uint16_t init_raw_adc = adc_read(ADC_Channel_7);
+    int32_t sweep = config.hard_max_angle - config.hard_min_angle;
+    int32_t init_angle_q8 = (sweep * (int32_t)init_raw_adc * 256) / 4095 + (config.hard_min_angle << 8);
+    current_angle = (init_angle_q8 + 128) >> 8;
+    target_angle = current_angle;
+    ghost_angle_q8 = init_angle_q8;
+    active_velocity = config.max_velocity;
+
+#if DEBUG_LOG
+    uart_print("Soft-Start Complete. Locked Initial Angle: ");
+    uart_print_int(current_angle);
+    uart_print(" deg.\r\n");
+#endif
 
     static uint32_t last_pid_time = 0;
 
     while (1) {
-        // A. Check if the physical reset button on PA5 is pressed (reads LOW/RESET)
+        // A. Software System Reset Trigger (Debounced reset button on PA5)
         if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_5) == Bit_RESET) {
-            uart_print("\r\n[RESET] Physical Button Pressed! Triggering Software System Reset...\r\n");
-            delay_ms(50); // Debounce delay
-            NVIC_SystemReset(); // Call CMSIS Standard System Reset
+#if DEBUG_LOG
+            uart_print("\r\n[RESET] Triggering Software Reset...\r\n");
+#endif
+            delay_ms(50);
+            NVIC_SystemReset();
         }
 
-        // B. Process non-blocking USART1 serial target input
-        process_serial_input();
+        // B. Process non-blocking packet bus parser
+        process_packet_input();
 
-        // C. Update PID Position Control Loop every 10ms (non-blocking)
+        // C. Update Trajectory ramps, protections, and PID loop strictly every 1ms
         if (millis() - last_pid_time >= PID_INTERVAL_MS) {
             last_pid_time = millis();
-            pid_update(TimerPeriod);
+            one_ms_task(TimerPeriod);
         }
 
-        // D. Periodic logging: full status when moving, only current when idle
-        static uint32_t last_print_time = 0;
-        if (millis() - last_print_time >= 100) { // Print every 100ms
-            last_print_time = millis();
-            if (status_reporting_enabled) {
-                print_status();
-            } else {
-                uart_print("[CURRENT] ");
-                uart_print_int(read_current_ma());
-                uart_print(" mA\r\n");
-            }
-        }
+        // D. Periodic logging disabled for production to keep single-wire bus clear.
+        // The master reads current and position via binary STATUS REPLY packets.
 
-        // E. Tiny stabilization delay to optimize loop frequency
-        delay_ms(1);
+        // E. Prevent cycle spinning overload
+        // (Removed delay_ms(1) to run at full speed and avoid UART overrun)
     }
 }
