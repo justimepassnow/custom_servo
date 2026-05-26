@@ -6,8 +6,8 @@
 #define ANGLE_MIN 45
 #define ANGLE_MAX 280
 #define PID_INTERVAL_MS 1
-#define INTEGRAL_LIMIT_Q8 25600 // ~100 degrees max windup limit in Q8
-#define DEADBAND_Q8 384         // 1.5 degrees deadband in Q8
+#define INTEGRAL_LIMIT_Q8 25600000 // ~100 degree-seconds max windup limit in Q8
+#define DEADBAND_Q8 128      // 0.5 degrees deadband in Q8
 
 // Logging Configuration (Set to 0 for silent multi-servo production daisy-chaining)
 #define DEBUG_LOG 1
@@ -58,6 +58,7 @@ int32_t pid_derivative = 0;
 volatile int32_t target_angle = 150;      // default target (degrees)
 volatile int32_t ghost_angle_q8 = 150*256; // Ghost Target in Q8
 volatile int32_t current_angle = 0;       // Current physical angle
+volatile int32_t current_angle_q8 = 0;    // Current physical angle in Q8
 volatile uint16_t active_velocity = 180;  // Active velocity in deg/s
 volatile uint8_t status_reporting_enabled = 0;
 
@@ -68,8 +69,35 @@ volatile uint32_t overcurrent_ms = 0;
 volatile uint8_t motor_armed = 0; // Arm on first valid CONTROL packet
 volatile int32_t zero_current_offset_adc = 0; // Startup auto-zero calibration offset
 
+typedef enum {
+    TUNE_STATE_IDLE = 0,
+    TUNE_STATE_START,
+    TUNE_STATE_RUNNING,
+    TUNE_STATE_CALCULATING,
+    TUNE_STATE_FAILED
+} TuneState;
+
+// Global tuning variables
+volatile TuneState tune_state = TUNE_STATE_IDLE;
+int32_t tune_midpoint_q8 = 0;
+int32_t tune_relay_amplitude = 0; // d (PWM duty cycle counts)
+int32_t tune_hysteresis_q8 = 128;   // H (0.5 degrees)
+uint32_t tune_target_cycles = 5;
+uint32_t tune_cycle_count = 0;
+uint32_t tune_last_crossing_time = 0;
+uint32_t tune_cycle_start_time = 0;
+
+// Oscillation data collection
+int32_t tune_peak_high = -999999;
+int32_t tune_peak_low = 999999;
+int32_t tune_relay_output = 0; // Active drive direction (+d or -d)
+int32_t tune_amplitude_sum = 0;
+int32_t tune_period_sum = 0;
+uint32_t tune_timeout_ms = 0;
+
 void print_status(void);
 int32_t read_current_ma(void);
+void send_config_reply(void);
 
 // Flash Erase/Write Helper Functions
 void flash_erase_page(uint32_t address) {
@@ -135,11 +163,10 @@ void flash_load_config(ServoConfig *cfg) {
         flash_write_config(cfg);
     }
 
-    // Precalculate active fixed-point gains scaled for 1ms task interval (dt = 0.001s)
+    // Keep unscaled Q16 gains for high-precision dynamic scaling in PID loop
     Kp_q16 = cfg->kp_q16;
-    Ki_q16 = cfg->ki_q16 / 1000; // scaled by dt (0.001)
-    if (Ki_q16 < 1 && cfg->ki_q16 > 0) Ki_q16 = 1; // prevent underflow loss if small
-    Kd_q16 = cfg->kd_q16 * 1000; // scaled by 1/dt (1000)
+    Ki_q16 = cfg->ki_q16;
+    Kd_q16 = cfg->kd_q16;
 }
 
 // System Init
@@ -155,7 +182,7 @@ void SystemInit(void) {
     RCC->CFGR |= (0x00U << RCC_CFGR_HPRE_Pos);
     
     RCC->CFGR &= ~RCC_CFGR_PPRE1_Msk;
-    RCC->CFGR |= (0x04U << RCC_CFGR_PPRE1_Pos);
+    RCC->CFGR |= (0x00U << RCC_CFGR_PPRE1_Pos);
     
     RCC->CFGR &= ~RCC_CFGR_SW_Msk;
     RCC->CFGR |= (0x02U << RCC_CFGR_SW_Pos);
@@ -285,13 +312,13 @@ void adc_init(void) {
     // 2. Initialize ADC1
     ADC_StructInit(&ADC_InitStruct);
     ADC_InitStruct.ADC_Resolution       = ADC_Resolution_12b;
-    ADC_InitStruct.ADC_Prescaler        = ADC_Prescaler_3; // 8MHz ADC clock
+    ADC_InitStruct.ADC_Prescaler        = ADC_Prescaler_3; // 16MHz ADC clock @ 48MHz PCLK
     ADC_InitStruct.ADC_Mode             = ADC_Mode_Imm;
     ADC_InitStruct.ADC_DataAlign        = ADC_DataAlign_Right;
     ADC_Init(ADC1, &ADC_InitStruct);
 
-    // 3. Configure sampling time for high-speed conversions (8.5 + 12.5 = 21 cycles @ 8MHz = 2.62us)
-    ADC_SampleTimeConfig(ADC1, ADC_SampleTime_8_5);
+    // 3. Configure sampling time for fast and safe settling (14.5 + 12.5 = 27 cycles @ 8MHz = 3.3us)
+    ADC_SampleTimeConfig(ADC1, ADC_SampleTime_14_5);
 
     // 4. Configure PA7 and PA2 as Analog Inputs (AIN)
     RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
@@ -306,12 +333,26 @@ void adc_init(void) {
 }
 
 uint16_t adc_read(uint8_t channel) {
+    static uint8_t last_channel = 0xFF;
+    
     ADC_AnyChannelNumCfg(ADC1, 0);
     ADC_AnyChannelSelect(ADC1, ADC_AnyChannel_0, channel);
     ADC_AnyChannelCmd(ADC1, ENABLE);
 
-    ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+    // 1. Perform dummy conversion ONLY if we switched channels to let the S&H capacitor settle
+    if (channel != last_channel) {
+        last_channel = channel;
+        
+        ADC_SoftwareStartConvCmd(ADC1, ENABLE);
+        while (RESET == ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC)) {
+            __ASM("nop");
+        }
+        ADC_ClearFlag(ADC1, ADC_FLAG_EOC);
+        (void)ADC_GetConversionValue(ADC1);
+    }
 
+    // 2. Perform actual high-precision conversion
+    ADC_SoftwareStartConvCmd(ADC1, ENABLE);
     while (RESET == ADC_GetFlagStatus(ADC1, ADC_FLAG_EOC)) {
         __ASM("nop");
     }
@@ -327,30 +368,7 @@ uint16_t adc_read(uint8_t channel) {
 int32_t read_current_ma(void) {
     static int32_t filtered_current_q8 = -1;
     
-    // 1. Synchronize reading with the midpoint of the active PWM drive pulse
-    uint32_t pulse3 = TIM1->CCR3;
-    uint32_t pulse2 = TIM1->CCR2;
-    uint32_t arr = TIM1->ARR;
-    uint32_t active_pulse = 0;
-    
-    // Find active pulse width based on which channel is modulated in inverted PWM
-    if (pulse3 > 0 && pulse3 < arr) {
-        active_pulse = arr - pulse3; // Forward active drive width
-    } else if (pulse2 > 0 && pulse2 < arr) {
-        active_pulse = arr - pulse2; // Reverse active drive width
-    }
-
-    if (active_pulse > 50) { // Only sync if the drive pulse is wide enough (e.g., >50 counts)
-        // Midpoint of active drive pulse = arr_period - (active_pulse / 2)
-        uint32_t target_cnt = arr - (active_pulse / 2);
-        
-        // Wait in software until the timer counter reaches this midpoint
-        while (TIM1->CNT < target_cnt) {
-            __ASM("nop");
-        }
-    }
-    
-    // 2. Perform fast analog conversion
+    // Perform fast non-blocking analog conversion (filtered by EMA)
     uint16_t raw_adc = adc_read(ADC_Channel_5); // PA2 maps to ADC1_VIN[5]
     
     // Apply baseline offset calibration
@@ -360,9 +378,9 @@ int32_t read_current_ma(void) {
     }
     
     // Scale standard integer calculation directly to Q8 format
-    // Math: current_ma_q8 = (corrected_raw * 16500 * 256) / 4095 = (corrected_raw * 4224000) / 4095
+    // Math: current_ma_q8 = (corrected_raw * 3300 * 256) / 4095 = (corrected_raw * 844800) / 4095
     // Cast to 64-bit integer before multiplying to prevent 32-bit arithmetic overflow!
-    int32_t current_ma_q8 = (int32_t)(((int64_t)corrected_raw * 4224000) / 4095);
+    int32_t current_ma_q8 = (int32_t)(((int64_t)corrected_raw * 844800) / 4095);
     
     if (filtered_current_q8 < 0) {
         filtered_current_q8 = current_ma_q8;
@@ -376,6 +394,9 @@ int32_t read_current_ma(void) {
 
 // Transmit immediate status packet reply (echoing instruction)
 void send_status_reply(uint8_t echoed_instruction) {
+    // 1ms Turnaround delay to let master (RP2040) switch to RX mode and clear its echo buffer
+    delay_ms(1);
+    
     uint8_t packet[11];
     packet[0] = 0xFF;
     packet[1] = 0xFF;
@@ -412,6 +433,38 @@ void send_status_reply(uint8_t echoed_instruction) {
     // Transmit over shared single-wire bus
     uart_enable_tx();
     for (int i = 0; i < 11; i++) {
+        uart_putchar_raw((char)packet[i]);
+    }
+    uart_enable_rx();
+}
+
+void send_config_reply(void) {
+    // 1ms Turnaround delay to let master (RP2040) switch to RX mode and clear its echo buffer
+    delay_ms(1);
+    
+    uint8_t packet[36];
+    packet[0] = 0xFF;
+    packet[1] = 0xFF;
+    packet[2] = config.servo_id;
+    packet[3] = 32; // Length: Instruction (1) + 30 Params + Checksum (1)
+    packet[4] = 0x05; // Echoed Instruction
+    
+    // Copy the entire 30-byte config struct as parameters
+    uint8_t *config_bytes = (uint8_t *)&config;
+    for (int i = 0; i < 30; i++) {
+        packet[5 + i] = config_bytes[i];
+    }
+    
+    // Checksum: lower 8 bits of bitwise NOT of sum of ID to last parameter
+    uint8_t sum = packet[2] + packet[3] + packet[4];
+    for (int i = 0; i < 30; i++) {
+        sum += packet[5 + i];
+    }
+    packet[35] = ~sum;
+    
+    // Transmit over shared single-wire bus
+    uart_enable_tx();
+    for (int i = 0; i < 36; i++) {
         uart_putchar_raw((char)packet[i]);
     }
     uart_enable_rx();
@@ -535,9 +588,8 @@ void process_packet_input(void) {
                             flash_write_config(&new_cfg);
                             config = new_cfg;
                             Kp_q16 = config.kp_q16;
-                            Ki_q16 = config.ki_q16 / 1000;
-                            if (Ki_q16 < 1 && config.ki_q16 > 0) Ki_q16 = 1;
-                            Kd_q16 = config.kd_q16 * 1000;
+                            Ki_q16 = config.ki_q16;
+                            Kd_q16 = config.kd_q16;
                             
                             if (rx_id != 0xFE) {
                                 send_status_reply(0x02);
@@ -563,6 +615,45 @@ void process_packet_input(void) {
                                 send_status_reply(0x04);
                             }
                         }
+                        // 5. READ_CONFIG Command
+                        else if (rx_instruction == 0x05) {
+                            if (rx_id != 0xFE) {
+                                send_config_reply();
+                            }
+                        }
+                        // 6. START_TUNING Command
+                        else if (rx_instruction == 0x06) {
+                            if (!overcurrent_fault && !stall_fault && tune_state == TUNE_STATE_IDLE) {
+                                uint8_t duty_percent = rx_params[0];
+                                uint8_t hyst_tenths = rx_params[1];
+                                uint8_t cycles = rx_params[2];
+                                uint16_t cmd_midpoint = rx_params[3] | (rx_params[4] << 8);
+
+                                // Bounds checks & defaults
+                                if (duty_percent < 5 || duty_percent > 60) duty_percent = 20; // default 20%
+                                if (hyst_tenths < 2 || hyst_tenths > 30) hyst_tenths = 5;      // default 0.5 degrees
+                                if (cycles < 3 || cycles > 10) cycles = 5;                     // default 5 cycles
+
+                                tune_target_cycles = cycles;
+                                tune_hysteresis_q8 = (int32_t)hyst_tenths * 25; // 0.1 deg = 25.6 in Q8 (approx 25)
+                                
+                                uint32_t TimerPeriod = TIM1->ARR;
+                                tune_relay_amplitude = (TimerPeriod * duty_percent) / 100;
+
+                                if (cmd_midpoint >= config.min_angle && cmd_midpoint <= config.max_angle) {
+                                    tune_midpoint_q8 = (int32_t)cmd_midpoint << 8;
+                                } else {
+                                    tune_midpoint_q8 = current_angle_q8; // default to current position
+                                }
+
+                                // Arm tuning state machine
+                                tune_state = TUNE_STATE_START;
+                                motor_armed = 1;
+                            }
+                            if (rx_id != 0xFE) {
+                                send_status_reply(0x06);
+                            }
+                        }
                     }
                     rx_state = RX_STATE_HEADER1;
                 }
@@ -574,12 +665,6 @@ void process_packet_input(void) {
 // PID Controller Loop
 void pid_update(uint32_t arr_period) {
     if (overcurrent_fault || stall_fault) {
-        TIM_SetCompare3(TIM1, 0);
-        TIM_SetCompare2(TIM1, 0);
-        return;
-    }
-
-    if (!motor_armed) {
         TIM_SetCompare3(TIM1, 0);
         TIM_SetCompare2(TIM1, 0);
         return;
@@ -599,10 +684,20 @@ void pid_update(uint32_t arr_period) {
     // 2. Convert to Q8 angle using high-precision linear interpolation of hard calibration limits
     // Retains all 8 bits of fractional filtering smoothness from filtered_adc_q8!
     int32_t sweep = config.hard_max_angle - config.hard_min_angle;
-    int32_t current_angle_q8 = (sweep * filtered_adc_q8) / 4095 + (config.hard_min_angle << 8);
+    if (config.direction_invert) {
+        current_angle_q8 = (config.hard_max_angle << 8) - (sweep * filtered_adc_q8) / 4095;
+    } else {
+        current_angle_q8 = (sweep * filtered_adc_q8) / 4095 + (config.hard_min_angle << 8);
+    }
     
     // Update global degree angle (round Q8 to integer)
     current_angle = (current_angle_q8 + 128) >> 8;
+
+    if (!motor_armed) {
+        TIM_SetCompare3(TIM1, 0);
+        TIM_SetCompare2(TIM1, 0);
+        return;
+    }
 
     // 3. Compute error relative to the Ghost Target
     pid_error = ghost_angle_q8 - current_angle_q8;
@@ -624,6 +719,9 @@ void pid_update(uint32_t arr_period) {
 #endif
             }
             return;
+        } else {
+            // Actively tracking outside the deadband, so we are still moving
+            status_reporting_enabled = 1;
         }
     }
 
@@ -634,12 +732,12 @@ void pid_update(uint32_t arr_period) {
     if (pid_integral > INTEGRAL_LIMIT_Q8) pid_integral = INTEGRAL_LIMIT_Q8;
     else if (pid_integral < -INTEGRAL_LIMIT_Q8) pid_integral = -INTEGRAL_LIMIT_Q8;
     
-    int64_t i_term = (int64_t)Ki_q16 * (int64_t)pid_integral;
+    int64_t i_term = ((int64_t)Ki_q16 * (int64_t)pid_integral) / 1000;
 
     pid_derivative = pid_error - prev_error;
     prev_error = pid_error;
     
-    int64_t d_term = (int64_t)Kd_q16 * (int64_t)pid_derivative;
+    int64_t d_term = (int64_t)Kd_q16 * (int64_t)pid_derivative * 1000;
 
     int64_t pid_out_q24 = p_term + i_term + d_term;
     int32_t pid_out = (int32_t)(pid_out_q24 >> 24);
@@ -666,30 +764,150 @@ void pid_update(uint32_t arr_period) {
     }
 }
 
-// 1ms Critical Task Loop (Trajectory Ramping & Protection Checks)
-void one_ms_task(uint32_t arr_period) {
-    // 1. Trajectory Profiling (Velocity control of Ghost Target)
-    int32_t target_angle_q8 = target_angle << 8;
-    int32_t step_q8 = ((int32_t)active_velocity * 32) / 125; // (velocity * 256) / 1000
-    if (step_q8 < 1) step_q8 = 1;
-    
-    if (ghost_angle_q8 < target_angle_q8) {
-        ghost_angle_q8 += step_q8;
-        if (ghost_angle_q8 > target_angle_q8) {
-            ghost_angle_q8 = target_angle_q8;
+void run_relay_tuning(uint32_t arr_period) {
+    if (tune_state == TUNE_STATE_START) {
+        tune_cycle_count = 0;
+        tune_amplitude_sum = 0;
+        tune_period_sum = 0;
+        tune_peak_high = -999999;
+        tune_peak_low = 999999;
+        tune_last_crossing_time = millis();
+        tune_cycle_start_time = millis();
+        tune_timeout_ms = millis();
+        
+        // Initial forward kick
+        tune_relay_output = tune_relay_amplitude;
+        tune_state = TUNE_STATE_RUNNING;
+        return;
+    }
+
+    if (tune_state != TUNE_STATE_RUNNING) return;
+
+    // Safety Timeout (if motor gets stuck or fails to cross boundaries for 3 seconds)
+    if (millis() - tune_timeout_ms > 3000) {
+        tune_state = TUNE_STATE_FAILED;
+        TIM_SetCompare3(TIM1, 0);
+        TIM_SetCompare2(TIM1, 0);
+        motor_armed = 0;
+        return;
+    }
+
+    int32_t error_q8 = current_angle_q8 - tune_midpoint_q8;
+
+    // Track extremes of the oscillation cycle
+    if (error_q8 > tune_peak_high) tune_peak_high = error_q8;
+    if (error_q8 < tune_peak_low)  tune_peak_low = error_q8;
+
+    // Relay Switching with Hysteresis
+    if (tune_relay_output > 0) {
+        if (error_q8 > tune_hysteresis_q8) {
+            // Upper threshold crossed -> switch to backward drive
+            tune_relay_output = -tune_relay_amplitude;
+            tune_timeout_ms = millis();
         }
-    } else if (ghost_angle_q8 > target_angle_q8) {
-        ghost_angle_q8 -= step_q8;
-        if (ghost_angle_q8 < target_angle_q8) {
-            ghost_angle_q8 = target_angle_q8;
+    } else {
+        if (error_q8 < -tune_hysteresis_q8) {
+            // Lower threshold crossed -> switch to forward drive
+            tune_relay_output = tune_relay_amplitude;
+            tune_timeout_ms = millis();
+
+            // This completes a full oscillation cycle!
+            uint32_t cycle_duration = millis() - tune_cycle_start_time;
+            tune_cycle_start_time = millis();
+
+            // Calculate peak-to-peak amplitude
+            int32_t p2p_amp = tune_peak_high - tune_peak_low;
+
+            // Discard the very first cycle (transient stabilization)
+            if (tune_cycle_count > 0 && p2p_amp > (2 * tune_hysteresis_q8)) {
+                tune_amplitude_sum += p2p_amp;
+                tune_period_sum += cycle_duration;
+            }
+            tune_cycle_count++;
+
+            // Reset extremes for next cycle
+            tune_peak_high = -999999;
+            tune_peak_low = 999999;
+
+            // Check if calibration is complete
+            if (tune_cycle_count > tune_target_cycles) {
+                tune_state = TUNE_STATE_CALCULATING;
+            }
         }
     }
+
+    // Drive Motor using Slow-Decay
+    if (tune_state == TUNE_STATE_RUNNING) {
+        if (tune_relay_output >= 0) {
+            TIM_SetCompare3(TIM1, arr_period);
+            TIM_SetCompare2(TIM1, arr_period - tune_relay_output);
+        } else {
+            TIM_SetCompare3(TIM1, arr_period - (-tune_relay_output));
+            TIM_SetCompare2(TIM1, arr_period);
+        }
+    }
+}
+
+void calculate_tuning_gains(void) {
+    uint32_t actual_samples = tune_cycle_count - 1; // subtracted the transient cycle
+    if (actual_samples == 0) actual_samples = 1;
+    
+    int32_t a_avg = tune_amplitude_sum / actual_samples;
+    int32_t T_avg = tune_period_sum / actual_samples; // in ms
+    if (T_avg == 0) T_avg = 1;
+
+    if (a_avg <= (2 * tune_hysteresis_q8)) {
+        tune_state = TUNE_STATE_FAILED;
+        return;
+    }
+
+    // 1. Calculate Ultimate Gain (Ku) in Q16
+    // Formula: Ku = (4 * d) / (pi * a)
+    // Scaled: Ku_q16 = (262144 * d) / (pi * a)
+    int64_t ku_numerator = 262144ULL * tune_relay_amplitude;
+    int32_t ku_q16 = (int32_t)((ku_numerator * 100000) / (314159LL * a_avg));
+
+    // 2. Apply Ziegler-Nichols formulas for standard PID
+    // Kp = 0.6 * Ku
+    // Ki = 2.0 * Kp / Pu  (where Pu = T_avg / 1000 sec) -> Ki = 2000 * Kp / T_avg
+    // Kd = Kp * Pu / 8    (where Pu = T_avg / 1000 sec) -> Kd = Kp * T_avg / 8000
+    config.kp_q16 = (6 * ku_q16) / 10;
+    config.ki_q16 = (2000LL * config.kp_q16) / T_avg;
+    config.kd_q16 = (config.kp_q16 * T_avg) / 8000;
+
+    // Safety clamp to prevent overflow/unstable gains
+    if (config.kp_q16 > 32768000) config.kp_q16 = 32768000; // limit Kp to 500
+    if (config.ki_q16 > 655360)   config.ki_q16 = 655360;   // limit Ki to 10
+    if (config.kd_q16 > 32768000) config.kd_q16 = 32768000; // limit Kd to 500
+
+    // 3. Persist new gains to Flash
+    flash_write_config(&config);
+
+    // 4. Precalculate active variables
+    Kp_q16 = config.kp_q16;
+    Ki_q16 = config.ki_q16;
+    Kd_q16 = config.kd_q16;
+
+    // 5. Exit tuning safely
+    target_angle = current_angle;
+    ghost_angle_q8 = current_angle_q8;
+    tune_state = TUNE_STATE_IDLE;
+    
+    // Clear tracking flags
+    pid_integral = 0;
+    prev_error = 0;
+}
+
+// 1ms Critical Task Loop (Trajectory Ramping & Protection Checks)
+void one_ms_task(uint32_t arr_period) {
+    // 1. Trajectory Profiling (Velocity control of Ghost Target) - Disabled for raw direct PID tracking
+    ghost_angle_q8 = target_angle << 8;
 
     // 2. Over-Current Protection
     int32_t current_ma = read_current_ma();
     if (current_ma > (int32_t)config.current_limit) {
         overcurrent_ms++;
-        if (overcurrent_ms >= 5) {
+        if (overcurrent_ms >= 50) {
             overcurrent_fault = 1;
             TIM_SetCompare3(TIM1, 0);
             TIM_SetCompare2(TIM1, 0);
@@ -698,22 +916,37 @@ void one_ms_task(uint32_t arr_period) {
         overcurrent_ms = 0;
     }
 
-    // 3. Stall Detection (evaluated once every 100ms)
+    /*
+    // 3. Stall Detection (evaluated once every 200ms)
     static uint32_t last_stall_check_time = 0;
     static int32_t last_angle_q8 = -1;
-    if (millis() - last_stall_check_time >= 100) {
+    if (millis() - last_stall_check_time >= 200) {
         last_stall_check_time = millis();
         uint32_t pulse3 = TIM1->CCR3;
         uint32_t pulse2 = TIM1->CCR2;
         
-        if (pulse3 > 0 || pulse2 > 0) { // motor is driven
-            int32_t current_angle_q8 = current_angle << 8;
+        // Calculate the active PWM duty cycle applied to the motor
+        uint32_t active_duty = 0;
+        if (pulse3 == arr_period) {
+            active_duty = arr_period - pulse2;
+        } else if (pulse2 == arr_period) {
+            active_duty = arr_period - pulse3;
+        }
+
+        // Motor is actively driven only if H-bridge is modulating (not fully braking or coasting)
+        if ((pulse3 > 0 && pulse3 < arr_period) || (pulse2 > 0 && pulse2 < arr_period)) {
             if (last_angle_q8 >= 0) {
                 int32_t delta = current_angle_q8 - last_angle_q8;
                 if (delta < 0) delta = -delta;
                 
-                // 2 degrees in Q8 is 512 counts
-                if (delta < 512) {
+                int32_t error_deg = target_angle - current_angle;
+                if (error_deg < 0) error_deg = -error_deg;
+                
+                // Trigger stall only if:
+                // 1. The position error is significant (> 5 degrees)
+                // 2. The motor is being driven with a high duty cycle (> 33% of max period)
+                // 3. The angle hasn't changed much (less than 1.5 degrees / 384 counts in Q8)
+                if (error_deg > 5 && active_duty > (arr_period / 3) && delta < 384) {
                     stall_fault = 1;
                     TIM_SetCompare3(TIM1, 0);
                     TIM_SetCompare2(TIM1, 0);
@@ -724,6 +957,7 @@ void one_ms_task(uint32_t arr_period) {
             last_angle_q8 = -1;
         }
     }
+    */
 
     // 4. Execute PID loop
     pid_update(arr_period);
@@ -861,7 +1095,13 @@ int main(void) {
     // 12. Soft Start: read current position to lock initial target securely
     uint16_t init_raw_adc = adc_read(ADC_Channel_7);
     int32_t sweep = config.hard_max_angle - config.hard_min_angle;
-    int32_t init_angle_q8 = (sweep * (int32_t)init_raw_adc * 256) / 4095 + (config.hard_min_angle << 8);
+    int32_t init_angle_q8;
+    if (config.direction_invert) {
+        init_angle_q8 = (config.hard_max_angle << 8) - (sweep * (int32_t)init_raw_adc * 256) / 4095;
+    } else {
+        init_angle_q8 = (sweep * (int32_t)init_raw_adc * 256) / 4095 + (config.hard_min_angle << 8);
+    }
+    current_angle_q8 = init_angle_q8;
     current_angle = (init_angle_q8 + 128) >> 8;
     target_angle = current_angle;
     ghost_angle_q8 = init_angle_q8;
