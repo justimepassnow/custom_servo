@@ -31,7 +31,6 @@ _INST_CONFIG     = 0x02
 _INST_POLL       = 0x03
 _INST_CLEAR_ERR  = 0x04
 _INST_READ_CONFIG = 0x05
-_INST_START_TUNING = 0x06
 
 _STATUS_REPLY_LEN = 11  # Total bytes in a status reply packet
 _CONFIG_REPLY_LEN = 36  # Total bytes in a configuration reply packet
@@ -43,6 +42,7 @@ _MASK_VELOCITY   = 1 << 2
 _MASK_CURRENT    = 1 << 3
 _MASK_PID        = 1 << 4
 _MASK_HARD_CAL   = 1 << 5
+_MASK_RAM_ONLY   = 1 << 6
 
 # Reply timeout (ms) — generous for slow single-wire turnaround
 _REPLY_TIMEOUT_MS = 50
@@ -480,32 +480,6 @@ class Servo:
         pkt = _build_packet(self._id, _INST_READ_CONFIG)
         return self._bus._transact(pkt, expect_reply=True, expected_len=_CONFIG_REPLY_LEN)
 
-    # ── START_TUNING (0x06) ──────────────────────────────────────────────
-
-    def start_tuning(self, duty_percent=20, hysteresis_tenths=5, cycles=5, midpoint=0):
-        """
-        Trigger the automated relay autotuning sequence on the servo.
-
-        Parameters
-        ----------
-        duty_percent : int
-            Relay drive amplitude percentage (5% to 60%, default: 20%).
-        hysteresis_tenths : int
-            Hysteresis deadband in tenths of a degree (e.g., 5 = 0.5 deg). Range: 2 to 30.
-        cycles : int
-            Number of oscillation cycles to observe (3 to 10, default: 5).
-        midpoint : int
-            Target midpoint angle in degrees to oscillate around.
-            If 0, calibrates at the current position.
-
-        Returns
-        -------
-        ServoStatus or None
-            Status reply acknowledging the command (None on timeout).
-        """
-        params = struct.pack('<BBBH', int(duty_percent), int(hysteresis_tenths), int(cycles), int(midpoint))
-        pkt = _build_packet(self._id, _INST_START_TUNING, params)
-        return self._bus._transact(pkt, expect_reply=True)
 
     # ── CONFIG (0x02) — Granular Setters ─────────────────────────────────
     #    Each setter only sets its own update_mask bit.  All 25 parameter bytes
@@ -591,7 +565,7 @@ class Servo:
         struct.pack_into('<H', p, 7, int(current_limit))
         return self._send_config(_MASK_CURRENT, bytes(p))
 
-    def set_pid(self, kp=None, ki=None, kd=None):
+    def set_pid(self, kp=None, ki=None, kd=None, ram_only=False):
         """
         Set PID gains. Accepts float values — they are converted to Q16 internally.
 
@@ -603,6 +577,9 @@ class Servo:
             Integral gain. Default 0.05 in firmware.
         kd : float or None
             Derivative gain. Default 8.0 in firmware.
+        ram_only : bool
+            If True, updates the active parameters in RAM but skips saving to Flash.
+            Useful for rapid updates during tuning to prevent flash degradation.
 
         Note
         ----
@@ -618,10 +595,14 @@ class Servo:
             kd = 8.0
 
         p = self._blank_params()
+        mask = _MASK_PID
+        if ram_only:
+            mask |= _MASK_RAM_ONLY
+            
         struct.pack_into('<i', p, 9,  _float_to_q16(kp))
         struct.pack_into('<i', p, 13, _float_to_q16(ki))
         struct.pack_into('<i', p, 17, _float_to_q16(kd))
-        return self._send_config(_MASK_PID, bytes(p))
+        return self._send_config(mask, bytes(p))
 
     def set_hard_calibration(self, hard_min=0, hard_max=300):
         """
@@ -642,7 +623,7 @@ class Servo:
                   min_angle=None, max_angle=None,
                   max_velocity=None, current_limit=None,
                   kp=None, ki=None, kd=None,
-                  hard_min=None, hard_max=None):
+                  hard_min=None, hard_max=None, ram_only=False):
         """
         Update multiple configuration fields in a single CONFIG packet.
         Only the provided (non-None) fields are written; all others are
@@ -664,6 +645,8 @@ class Servo:
             PID gains (written as a group; provide all three or use set_pid).
         hard_min, hard_max : int or None
             Physical calibration angles (written as a group).
+        ram_only : bool
+            If True, skip writing changes to Flash memory.
 
         Returns
         -------
@@ -705,8 +688,11 @@ class Servo:
         if hard_min is not None and hard_max is not None:
             mask |= _MASK_HARD_CAL
             struct.pack_into('<HH', p, 21, int(hard_min), int(hard_max))
+            
+        if ram_only:
+            mask |= _MASK_RAM_ONLY
 
-        if mask == 0:
+        if mask == 0 or mask == _MASK_RAM_ONLY:
             return None  # Nothing to update
 
         return self._send_config(mask, bytes(p))

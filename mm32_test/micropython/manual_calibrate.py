@@ -144,13 +144,9 @@ print("Saving parameters...")
 
 # Soft limits set slightly inside the extrapolated limits (e.g. 20° to 240° for safety)
 flash_config = servo.configure(
-    min_angle=20,
-    max_angle=240,
     hard_min=virtual_hard_min,
     hard_max=virtual_hard_max,
-    kp=80.0,
-    ki=0.03,
-    kd=8.0
+   
 )
 
 if flash_config:

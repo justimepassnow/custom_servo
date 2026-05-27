@@ -106,7 +106,10 @@ print("\n--- STEP 3: Writing Safe Configurations ---")
 #   - Max velocity 120°/sec (moderate safe speed)
 #   - Current limit 1200mA (protects the H-bridge and motor)
 #   - Professionally tuned PID gains for absolute accuracy and zero overshoot
-
+servo.configure(
+      kp=102,
+      
+      )
 # Clear any persistent or startup faults so the motor can move
 print("Clearing any active or startup safety faults...")
 clear_status = servo.clear_error()
