@@ -14,7 +14,7 @@ A lightweight MicroPython library for controlling Smart Servos running the MM32 
 
 ## Wiring
 
-The servo firmware uses **half-duplex single-wire UART** on PA12 (open-drain) at **115200 baud, 8N1**.
+The servo firmware uses **half-duplex single-wire UART** on PA12 (open-drain) at **250000 baud, 8N1**.
 
 ### Minimal (Single-Wire, No Transceiver)
 
@@ -45,7 +45,7 @@ from machine import UART, Pin
 from smart_servo import ServoBus
 
 # Create bus (adjust pins for your board)
-uart = UART(1, baudrate=115200, tx=Pin(4))
+uart = UART(1, baudrate=250000, tx=Pin(4))
 bus  = ServoBus(uart)
 
 # Get a handle to servo at ID 0 (factory default)

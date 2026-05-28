@@ -41,7 +41,7 @@ from smart_servo import ServoBus
 # ─── 1. Initialize UART0 on RP2040-Zero ──────────────────────────────────────
 # On RP2040-Zero, GPIO 0 and GPIO 1 correspond to physical pins labeled '0' and '1'.
 print("Initializing UART0 on GP0 (Pin 0) and GP1 (Pin 1)...")
-uart = UART(0, baudrate=115200, tx=Pin(0), rx=Pin(1))
+uart = UART(0, baudrate=250000, tx=Pin(0), rx=Pin(1))
 bus = ServoBus(uart)
 
 # ─── 2. Step 1: Scan for Unconfigured Servo (Default ID 0) ───────────────────
@@ -106,7 +106,7 @@ else:
     current_limit=1000)
 
 
-
+servo.configure(max_velocity=90)
 print("Clearing any active or startup safety faults...")
 clear_status = servo.clear_error()
 if clear_status:
@@ -130,6 +130,12 @@ try:
             
         try:
             target_angle = int(user_input)
+        
+        except ValueError:
+            print("❌ Invalid input! Please enter a number.")
+            continue
+        try:
+            target_velocity = int(input("\nEnter target velocity: ").strip())
         except ValueError:
             print("❌ Invalid input! Please enter a number.")
             continue
@@ -139,7 +145,7 @@ try:
             continue
 
         print("Commanding target angle {}°...".format(target_angle))
-        status = servo.move(target_angle)
+        status = servo.move(target_angle, velocity=target_velocity)
         
         if status is None:
             print("❌ Servo is not responding to move command!")
@@ -163,7 +169,7 @@ try:
                     break
                     
                 # Safe fallback timeout (e.g. 8 seconds) in case it gets physically blocked
-                if time.ticks_diff(time.ticks_ms(), start_time) > 4000:
+                if time.ticks_diff(time.ticks_ms(), start_time) > 8000:
                     print("⚠️ Timeout: Took too long to reach the target.")
                     break
             else:

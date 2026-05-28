@@ -9,6 +9,9 @@
 #define INTEGRAL_LIMIT_Q8 25600000 // ~100 degree-seconds max windup limit in Q8
 #define DEADBAND_Q8 256    // 1 degree deadband in Q8
 
+// Default to 48MHz, since SystemInit configures it to 48MHz.
+uint32_t SystemCoreClock = 48000000U;
+
 // Logging Configuration (Set to 0 for silent multi-servo production daisy-chaining)
 #define DEBUG_LOG 1
 
@@ -43,7 +46,6 @@ typedef struct __attribute__((packed)) {
 
 // Global variables
 ServoConfig config;
-uint32_t SystemCoreClock = 8000000U;
 
 // PID active fixed-point gains (pre-calculated for 1ms time-step)
 volatile int32_t Kp_q16;
@@ -219,7 +221,7 @@ void uart_init(void) {
     GPIO_PinAFConfig(GPIOA, GPIO_PinSource12, GPIO_AF_1);
 
     USART_StructInit(&USART_InitStruct);
-    USART_InitStruct.USART_BaudRate   = 115200;
+    USART_InitStruct.USART_BaudRate   = 250000;
     USART_InitStruct.USART_WordLength = USART_WordLength_8b;
     USART_InitStruct.USART_StopBits   = USART_StopBits_1;
     USART_InitStruct.USART_Parity     = USART_Parity_No;
@@ -273,8 +275,14 @@ void uart_print_int(uint32_t val) {
 
 // 1ms SysTick interrupts
 volatile uint32_t ms_ticks = 0;
+uint32_t active_timer_period = 2399;
+static inline void one_ms_task(uint32_t arr_period);
+
 void SysTick_Handler(void) {
     ms_ticks++;
+    // Guarantee that the PID loop runs exactly every 1ms, 
+    // even if the main loop is blocked sending UART replies!
+    one_ms_task(active_timer_period);
 }
 
 uint32_t millis(void) {
@@ -445,6 +453,14 @@ void send_config_reply(void) {
 
 // Non-blocking binary packet parser (Now driven by Hardware Interrupt!)
 void USART1_IRQHandler(void) {
+    // Clear UART Error flags (Overrun, Noise, Framing) by reading SR then DR
+    if (USART_GetFlagStatus(USART1, USART_FLAG_ORE) != RESET ||
+        USART_GetFlagStatus(USART1, USART_FLAG_NF)  != RESET ||
+        USART_GetFlagStatus(USART1, USART_FLAG_FE)  != RESET) {
+        volatile uint16_t dummy = USART_ReceiveData(USART1);
+        (void)dummy;
+    }
+
     static RxState rx_state = RX_STATE_HEADER1;
     static uint8_t rx_id = 0;
     static uint8_t rx_length = 0;
@@ -754,7 +770,23 @@ static inline void one_ms_task(uint32_t arr_period) {
     }
 
     // 3. Normal trajectory ramping and PID execution
-    ghost_angle_q8 = target_angle << 8;
+    int32_t true_target_q8 = target_angle << 8;
+    
+    // If active_velocity is 0, disable trajectory planning (instant snap for max speed)
+    if (active_velocity == 0) {
+        ghost_angle_q8 = true_target_q8;
+    } else {
+        // Calculate max allowed step per millisecond based on active_velocity (Q8 format)
+        int32_t max_step_q8 = ((uint32_t)active_velocity * 256) / 1000;
+        
+        if (ghost_angle_q8 < true_target_q8) {
+            ghost_angle_q8 += max_step_q8;
+            if (ghost_angle_q8 > true_target_q8) ghost_angle_q8 = true_target_q8;
+        } else if (ghost_angle_q8 > true_target_q8) {
+            ghost_angle_q8 -= max_step_q8;
+            if (ghost_angle_q8 < true_target_q8) ghost_angle_q8 = true_target_q8;
+        }
+    }
     
     pid_update(arr_period);
 }
@@ -812,14 +844,17 @@ void calibrate_current_sensor(void) {
 }
 
 int main(void) {
+    // Synchronize the SystemCoreClock variable with the actual hardware PLL speed
+    // The C-runtime initialization overwrites the value set in SystemInit(), so we restore it here.
+    SystemCoreClock = 48000000U;
+
     GPIO_InitTypeDef        GPIO_InitStruct;
     TIM_TimeBaseInitTypeDef TIM_TimeBaseStruct;
     TIM_OCInitTypeDef       TIM_OCInitStruct;
 
-    // 1. Enable 1ms SysTick timekeeping interrupt
-    SysTick_Config(SystemCoreClock / 1000);
+    // (SysTick will be enabled at the end of initialization to prevent interrupt race conditions)
 
-    // 2. Initialize Single-Wire Half-Duplex USART1 at 115200 Baud
+    // 2. Initialize Single-Wire Half-Duplex USART1 at 250000 Baud
     uart_init();
 #if DEBUG_LOG
     uart_print("\n--- Smart Servo Overhauled Firmware Init ---\n");
@@ -841,6 +876,7 @@ int main(void) {
     uint32_t TimerClock = TIM_GetTIMxClock(TIM1);
     uint32_t TargetFrequency = 20000;
     uint32_t TimerPeriod = (TimerClock / TargetFrequency) - 1;
+    active_timer_period = TimerPeriod;
 
     TIM_TimeBaseStructInit(&TIM_TimeBaseStruct);
     TIM_TimeBaseStruct.TIM_Prescaler         = 0;
@@ -914,7 +950,8 @@ int main(void) {
     uart_print(" deg.\r\n");
 #endif
 
-    uint32_t last_tick = ms_ticks;
+    // 13. Enable 1ms SysTick timekeeping interrupt and PID Loop
+    SysTick_Config(SystemCoreClock / 1000);
 
     while (1) {
         // A. Software System Reset Trigger (Debounced reset button on PA5)
@@ -938,10 +975,6 @@ int main(void) {
             pending_reply_cmd = 0;
         }
 
-        // D. Update Trajectory ramps, protections, and PID loop strictly every 1ms
-        if (ms_ticks != last_tick) {
-            last_tick = ms_ticks;
-            one_ms_task(TimerPeriod);
-        }
+        // D. (PID loop is now handled purely in the background by SysTick_Handler!)
     }
 }

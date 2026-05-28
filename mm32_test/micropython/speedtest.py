@@ -18,7 +18,7 @@ from smart_servo import ServoBus
 
 # ─── 1. Initialize UART0 on RP2040-Zero ──────────────────────────────────────
 print("Initializing UART0 on GP0 (TX) and GP1 (RX)...")
-uart = UART(0, baudrate=115200, tx=Pin(0), rx=Pin(1))
+uart = UART(0, baudrate=250000, tx=Pin(0), rx=Pin(1))
 bus = ServoBus(uart)
 
 # ─── 2. Scan for Servos ───────────────────────────────────────────────────────
@@ -82,7 +82,7 @@ if clear_status:
     ))
 
 # ─── 7. Run Continuous Sweeping Loop ──────────────────────────────────────────
-targets = [0,90,180]
+targets = [0,90,180,90]
 print("\n--- [FEATURE TEST] Starting Continuous Sweep Loop ---")
 print("Target angles: {} and back to 20° in a loop.".format(targets))
 print("Press Ctrl+C to terminate.")
@@ -115,17 +115,17 @@ try:
                         print("✨ Arrived at target angle {}°!".format(pos.angle))
                         break
                         
-                    # 8-second safety timeout
-                    if time.ticks_diff(time.ticks_ms(), start_time) > 1000:
+                    # 2-second safety timeout
+                    if time.ticks_diff(time.ticks_ms(), start_time) > 2000:
                         print("⚠️ Timeout: Took too long to reach the target.")
                         break
                 else:
                     print("⚠️ Timeout - Servo not responding to status poll.")
                     
-                time.sleep_ms(500)
+                time.sleep_ms(20)
                 
             # Rest briefly at the target
-            time.sleep_ms(40)
+            time.sleep_ms(100)
             
         loop_count += 1
 

@@ -19,7 +19,7 @@ from smart_servo import ServoBus
 
 # ─── 1. Initialize UART0 on RP2040-Zero ──────────────────────────────────────
 print("Initializing UART0 on GP0 (TX) and GP1 (RX)...")
-uart = UART(0, baudrate=115200, tx=Pin(0), rx=Pin(1))
+uart = UART(0, baudrate=250000, tx=Pin(0), rx=Pin(1))
 bus = ServoBus(uart)
 
 # ─── 2. Scan for Servos ───────────────────────────────────────────────────────

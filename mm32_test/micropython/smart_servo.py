@@ -1,7 +1,7 @@
 """
 smart_servo.py — MicroPython driver for Smart Servo (MM32 firmware)
 
-Communicates over a half-duplex single-wire UART bus at 115200 baud.
+Communicates over a half-duplex single-wire UART bus at 250000 baud.
 Protocol: binary packets with 0xFF 0xFF header, ID, length, instruction,
 parameters (little-endian), and inverted-sum checksum.
 
@@ -11,7 +11,7 @@ Usage:
     from machine import UART, Pin
     from smart_servo import ServoBus
 
-    bus = ServoBus(UART(1, 115200), dir_pin=Pin(4, Pin.OUT))
+    bus = ServoBus(UART(1, 250000), dir_pin=Pin(4, Pin.OUT))
     servo = bus.servo(0)
     servo.move(180, velocity=200)
     status = servo.poll()
@@ -46,7 +46,7 @@ _MASK_RAM_ONLY   = 1 << 6
 _MASK_HARD_ADC   = 1 << 7
 
 # Reply timeout (ms) — generous for slow single-wire turnaround
-_REPLY_TIMEOUT_MS = 50
+_REPLY_TIMEOUT_MS = 100
 
 
 # ─── Status Reply Container ──────────────────────────────────────────────────
@@ -237,7 +237,7 @@ class ServoBus:
     Parameters
     ----------
     uart : machine.UART
-        Pre-configured UART instance at 115200 baud, 8N1.
+        Pre-configured UART instance at 250000 baud, 8N1.
         For single-wire mode the TX pin should be wired to the servo bus line.
     dir_pin : machine.Pin or None
         Optional direction control pin (active-high = transmit).
@@ -273,11 +273,13 @@ class ServoBus:
         self._tx_mode()
         self._uart.write(packet)
         # uart.write() is non-blocking on ESP32/RP2040 — bytes clock out in
-        # the background at 115200 baud (~87µs per byte).  We must wait for
-        # the entire packet to physically leave the TX pin before flipping
-        # the direction pin to RX mode.
-        wait_us = len(packet) * 87 + 100  # per-byte time + safety margin
-        time.sleep_us(wait_us)
+        # Flush if supported by the port, otherwise fallback to hardcoded delay
+        if hasattr(self._uart, 'flush'):
+            self._uart.flush()
+        else:
+            wait_us = len(packet) * 40 + 200
+            time.sleep_us(wait_us)
+            
         self._rx_mode()
 
     def _receive_reply(self, expected_len=_STATUS_REPLY_LEN):
