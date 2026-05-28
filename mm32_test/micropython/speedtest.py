@@ -59,19 +59,6 @@ else:
     import sys
     sys.exit()
 
-# ─── 4. Reconfigure Angle Limits to Allow Sweep down to 20° ─────────────────
-print("\n--- [FEATURE TEST] Reconfiguring Angle Limits (Min: 20°, Max: 240°) ---")
-# We modify min_angle to 20° so that the 20° target is reachable.
-# We keep PID gains, current limits, and velocities at safe default values.
-config_status = servo.configure(
-    min_angle=0,
-    max_angle=240
-)
-
-if config_status:
-    print("✅ Configuration command acknowledged.")
-else:
-    print("⚠️ Configuration command sent, but no reply was received.")
 
 # ─── 5. Verify the New Configuration via READ_CONFIG ─────────────────────────
 print("\n--- [FEATURE TEST] Verifying New Configuration from Flash ---")
@@ -90,8 +77,8 @@ else:
 print("\n--- Clearing any active safety faults ---")
 clear_status = servo.clear_error()
 if clear_status:
-    print("✅ Faults cleared. Current state: Overcurrent={}, Stall={}".format(
-        clear_status.overcurrent, clear_status.stall
+    print("✅ Faults cleared. Current state: Overcurrent={}".format(
+        clear_status.overcurrent
     ))
 
 # ─── 7. Run Continuous Sweeping Loop ──────────────────────────────────────────
@@ -120,7 +107,7 @@ try:
                     # Print real-time telemetry
                     print("  Angle: {:3d}° | Current: {:4d} mA | Moving: {!s:<5} | Fault: {}".format(
                         pos.angle, pos.current_ma, pos.is_moving, 
-                        "OVERCURRENT" if pos.overcurrent else "STALL" if pos.stall else "None"
+                        "OVERCURRENT" if pos.overcurrent else "None"
                     ))
                     
                     # Arrived if the moving flag becomes False
@@ -129,7 +116,7 @@ try:
                         break
                         
                     # 8-second safety timeout
-                    if time.ticks_diff(time.ticks_ms(), start_time) > 2000:
+                    if time.ticks_diff(time.ticks_ms(), start_time) > 1000:
                         print("⚠️ Timeout: Took too long to reach the target.")
                         break
                 else:

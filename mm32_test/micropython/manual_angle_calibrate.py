@@ -47,18 +47,24 @@ else:
     print("❌ Failed to query initial configuration!")
     import sys
     sys.exit()
-
+servo.disarm()
 old_min = initial_config.hard_min_angle
 old_max = initial_config.hard_max_angle
+old_min_adc = initial_config.hard_min_adc
+old_max_adc = initial_config.hard_max_adc
+
 old_sweep = old_max - old_min
+old_adc_range = old_max_adc - old_min_adc
 
 if old_sweep == 0:
     old_sweep = 280  # Safety fallback
+if old_adc_range == 0:
+    old_adc_range = 4095
 
 # ─── 4. Reconstruct ADC value at 0 Degrees ──────────────────────────────────
-print("\n--- Step 1: Align to 0 Degrees ---")
+print("\n--- Step 1: Align to Minimum Physical Stop (0°) ---")
 print("⚠️ The motor is UNPOWERED. You can rotate it easily by hand.")
-input("👉 Physically rotate the servo output shaft to exactly 0° (or min mechanical stop), then press Enter...")
+input("👉 Physically rotate the servo output shaft to the absolute minimum mechanical stop (0°), then press Enter...")
 
 # Poll several times to get a clean, settled reading
 pos_samples = []
@@ -78,9 +84,9 @@ avg_angle_0 = sum(pos_samples) / len(pos_samples)
 
 # Reconstruct raw 12-bit ADC value from reported angle
 if initial_config.direction_invert:
-    adc_0 = int((old_max - avg_angle_0) * 4095 / old_sweep)
+    adc_0 = int(old_max_adc - (avg_angle_0 - old_min) * old_adc_range / old_sweep)
 else:
-    adc_0 = int((avg_angle_0 - old_min) * 4095 / old_sweep)
+    adc_0 = int((avg_angle_0 - old_min) * old_adc_range / old_sweep + old_min_adc)
 
 # Clamp to 12-bit ADC range
 adc_0 = max(0, min(4095, adc_0))
@@ -88,7 +94,7 @@ print("✅ 0° calibration point recorded. Reconstructed ADC: {}".format(adc_0))
 
 # ─── 5. Reconstruct ADC value at 90 Degrees ─────────────────────────────────
 print("\n--- Step 2: Align to 90 Degrees ---")
-input("👉 Physically rotate the servo output shaft to exactly 90° by hand, then press Enter...")
+input("👉 Physically rotate the servo output shaft exactly 90° from the minimum stop, then press Enter...")
 
 pos_samples_90 = []
 for _ in range(5):
@@ -105,14 +111,38 @@ if not pos_samples_90:
 avg_angle_90 = sum(pos_samples_90) / len(pos_samples_90)
 
 if initial_config.direction_invert:
-    adc_90 = int((old_max - avg_angle_90) * 4095 / old_sweep)
+    adc_90 = int(old_max_adc - (avg_angle_90 - old_min) * old_adc_range / old_sweep)
 else:
-    adc_90 = int((avg_angle_90 - old_min) * 4095 / old_sweep)
+    adc_90 = int((avg_angle_90 - old_min) * old_adc_range / old_sweep + old_min_adc)
 
-adc_90 = max(0, min(4095, adc_90))
-print("✅ 90° calibration point recorded. Reconstructed ADC: {}".format(adc_90))
+# ─── 6. Reconstruct ADC value at Maximum Physical Stop ──────────────────────
+print("\n--- Step 3: Align to Maximum Physical Stop ---")
+input("👉 Physically rotate the servo output shaft to the absolute maximum mechanical stop, then press Enter...")
 
-# ─── 6. Compute Linear Slope and Extrapolate Virtual Endpoints ──────────────
+pos_samples_max = []
+for _ in range(5):
+    status = servo.poll()
+    if status:
+        pos_samples_max.append(status.angle)
+    time.sleep_ms(50)
+
+if not pos_samples_max:
+    print("❌ Failed to communicate with servo!")
+    import sys
+    sys.exit()
+
+avg_angle_max = sum(pos_samples_max) / len(pos_samples_max)
+
+if initial_config.direction_invert:
+    adc_max = int(old_max_adc - (avg_angle_max - old_min) * old_adc_range / old_sweep)
+else:
+    adc_max = int((avg_angle_max - old_min) * old_adc_range / old_sweep + old_min_adc)
+
+adc_max = max(0, min(4095, adc_max))
+print("✅ Maximum calibration point recorded. Reconstructed ADC: {}".format(adc_max))
+
+
+# ─── 7. Compute True Max Angle ───────────────────────────────────────────────
 adc_delta = adc_90 - adc_0
 
 if adc_delta == 0:
@@ -120,33 +150,26 @@ if adc_delta == 0:
     import sys
     sys.exit()
 
-# Calculate degrees per ADC count
 slope = 90.0 / adc_delta
+max_angle_actual = int((adc_max - adc_0) * slope)
 
-# Extrapolate theoretical angles at ADC = 0 and ADC = 4095
-if initial_config.direction_invert:
-    # Under inverted pot, ADC = 4095 is min angle, ADC = 0 is max angle
-    virtual_hard_max = int(0.0 - slope * adc_0)
-    virtual_hard_min = int(0.0 + slope * (4095 - adc_0))
-else:
-    # Normal direction
-    virtual_hard_min = int(0.0 - slope * adc_0)
-    virtual_hard_max = int(0.0 + slope * (4095 - adc_0))
+print("\n--- Calibration Results ---")
+print("  - Potentiometer Slope: {:.5f} degrees/ADC".format(slope))
+print("  - ADC at Min Stop:     {}".format(adc_0))
+print("  - ADC at Max Stop:     {}".format(adc_max))
+print("  - Calculated Max Angle:{}°".format(max_angle_actual))
 
-print("\n--- Calibration Results & Extrapolations ---")
-print("  - Potentiometer Slope:  {:.5f} degrees/ADC".format(slope))
-print("  - Extrapolated Hard Min (ADC=0):    {}°".format(virtual_hard_min))
-print("  - Extrapolated Hard Max (ADC=4095):  {}°".format(virtual_hard_max))
-
-# ─── 7. Write Extrapolated Parameters to Flash ───────────────────────────────
+# ─── 8. Write Calibration to Flash ───────────────────────────────────────────
 input("\n👉 Press Enter to write these parameters to Flash...")
 print("Saving parameters...")
 
-# Soft limits set slightly inside the extrapolated limits (e.g. 20° to 240° for safety)
 flash_config = servo.configure(
-    hard_min=virtual_hard_min,
-    hard_max=virtual_hard_max,
-   
+    hard_min=0,
+    hard_max=max_angle_actual,
+    hard_min_adc=adc_0,
+    hard_max_adc=adc_max,
+    min_angle=0,
+    max_angle=max_angle_actual
 )
 
 if flash_config:
@@ -154,13 +177,14 @@ if flash_config:
 else:
     print("⚠️ Config saved (no explicit transaction reply).")
 
-# ─── 8. Print Final Verified Configuration ───────────────────────────────────
+# ─── 9. Print Final Verified Configuration ───────────────────────────────────
 print("\n--- Verifying Saved Flash Settings ---")
 final_verify = servo.read_config()
 if final_verify:
     print("Final Verified Flash Settings:")
     print("  - Software Limits:     {}° to {}°".format(final_verify.min_angle, final_verify.max_angle))
     print("  - Physical Hard Limits:{}° to {}°".format(final_verify.hard_min_angle, final_verify.hard_max_angle))
+    print("  - Physical ADC Limits: {} to {}".format(final_verify.hard_min_adc, final_verify.hard_max_adc))
     print("  - PID Tuning:          Kp={:.2f}, Ki={:.4f}, Kd={:.2f}".format(final_verify.kp, final_verify.ki, final_verify.kd))
     print("  - Magic Word:          {:#X}".format(final_verify.magic))
     print("\n🎉 MANUAL MULTI-POINT CALIBRATION COMPLETE!")

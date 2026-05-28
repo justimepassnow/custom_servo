@@ -156,7 +156,7 @@ while True:
     
     # Step to target1 with a strict 250ms time limit
     # This forces Kp to keep rising until the motor is fast enough to reach the target in <`50ms
-    max_ang, ovs, elapsed, err = perform_step(target1, timeout_ms=50)
+    max_ang, ovs, elapsed, err = perform_step(target1, timeout_ms=100)
     
     reached = False
     if target1 > start_angle and max_ang >= target1 - 2:
@@ -216,7 +216,7 @@ max_ang, ovs, elapsed, err = perform_step(target1)
 
 if err > 0:
     print(f"Steady state error is {err} deg. Injecting Ki = 0.01...")
-    current_ki = 0.01
+    current_ki = 0.1
     servo.set_pid(kp=current_kp, ki=current_ki, kd=current_kd, ram_only=True)
     
     start_watch = time.ticks_ms()

@@ -81,7 +81,6 @@ if status:
     print("  - Current:    {} mA".format(status.current_ma))
     print("  - Moving:     {}".format(status.is_moving))
     print("  - Overcurrent:{}".format(status.overcurrent))
-    print("  - Stall:      {}".format(status.stall))
 
 # Query and print the full non-volatile persistent configuration
 print("\n--- Querying Non-Volatile Flash Configuration ---")
@@ -94,34 +93,31 @@ if config_data:
     print("  - Max Velocity:    {}°/sec".format(config_data.max_velocity))
     print("  - Current Limit:   {} mA".format(config_data.current_limit))
     print("  - Tuning PID:      Kp={:.2f}, Ki={:.4f}, Kd={:.2f}".format(config_data.kp, config_data.ki, config_data.kd))
-    print("  - Calib Limits:    {}° (at ADC=0) to {}° (at ADC=4095)".format(config_data.hard_min_angle, config_data.hard_max_angle))
+    print("  - Physical Limits: {}° to {}°".format(config_data.hard_min_angle, config_data.hard_max_angle))
+    print("  - ADC Limits:      {} to {}".format(config_data.hard_min_adc, config_data.hard_max_adc))
     print("  - Magic Word:      {:#X}".format(config_data.magic))
 else:
-    print("⚠️ Could not read configuration from flash!")
+    print("⚠️ Could not read configuration from flash writing new configs!")
+    servo.configure(
+    servo_id=1,
+    min_angle=10,
+    max_angle=200,
+    max_velocity=180,
+    current_limit=1000)
 
-# ─── 4. Step 3: Configure Safety Limits and Save to Flash ────────────────────
-print("\n--- STEP 3: Writing Safe Configurations ---")
-# Let's set some safe operating limits:
-#   - Min angle 45°, Max angle 280°
-#   - Max velocity 120°/sec (moderate safe speed)
-#   - Current limit 1200mA (protects the H-bridge and motor)
-#   - Professionally tuned PID gains for absolute accuracy and zero overshoot
-servo.configure(
-      kp=102,
-      
-      )
-# Clear any persistent or startup faults so the motor can move
+
+
 print("Clearing any active or startup safety faults...")
 clear_status = servo.clear_error()
 if clear_status:
-    print("✅ Faults cleared successfully. Current State: Overcurrent={}, Stall={}".format(
-        clear_status.overcurrent, clear_status.stall
+    print("✅ Faults cleared successfully. Current State: Overcurrent={}".format(
+        clear_status.overcurrent
     ))
 else:
     print("⚠️ Clear error command sent, but no reply received.")
 
-# ─── 5. Step 4: Interactive Tracking Loop ─────────────────────────────────────
-print("\n--- STEP 4: Interactive Tracking Loop ---")
+# ─── 5. Step 3: Interactive Tracking Loop ─────────────────────────────────────
+print("\n--- STEP 3: Interactive Tracking Loop ---")
 print("Enter target angles to command the servo. Type 'exit' to stop.")
 print("-" * 60)
 
@@ -158,7 +154,7 @@ try:
             if pos:
                 print("  Angle: {:3d}° | Current: {:4d} mA | Moving: {!s:<5} | Fault: {}".format(
                     pos.angle, pos.current_ma, pos.is_moving, 
-                    "OVERCURRENT" if pos.overcurrent else "STALL" if pos.stall else "None"
+                    "OVERCURRENT" if pos.overcurrent else "None"
                 ))
                 
                 # Check if it has arrived (Moving flag is False)

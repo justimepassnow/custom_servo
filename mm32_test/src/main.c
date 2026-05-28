@@ -8,7 +8,6 @@
 #define PID_INTERVAL_MS 1
 #define INTEGRAL_LIMIT_Q8 25600000 // ~100 degree-seconds max windup limit in Q8
 #define DEADBAND_Q8 256    // 1 degree deadband in Q8
-#define TUNE_HALF_PERIOD_MS 300  // Time-based switching: flip direction every 300ms
 
 // Logging Configuration (Set to 0 for silent multi-servo production daisy-chaining)
 #define DEBUG_LOG 1
@@ -35,8 +34,10 @@ typedef struct __attribute__((packed)) {
     int32_t  kp_q16;          // PID proportional gain
     int32_t  ki_q16;          // PID integral gain
     int32_t  kd_q16;          // PID derivative gain
-    uint16_t hard_min_angle;  // physical degree angle at ADC = 0 (default: 0)
-    uint16_t hard_max_angle;  // physical degree angle at ADC = 4095 (default: 300)
+    uint16_t hard_min_angle;  // physical degree angle at hard_min_adc (default: 0)
+    uint16_t hard_max_angle;  // physical degree angle at hard_max_adc (default: 300)
+    uint16_t hard_min_adc;    // raw ADC value corresponding to hard_min_angle (default: 0)
+    uint16_t hard_max_adc;    // raw ADC value corresponding to hard_max_angle (default: 4095)
     uint32_t magic;           // 0xDEADBEEF Magic Word
 } ServoConfig;
 
@@ -47,12 +48,17 @@ uint32_t SystemCoreClock = 8000000U;
 // PID active fixed-point gains (pre-calculated for 1ms time-step)
 volatile int32_t Kp_q16;
 volatile int32_t Ki_q16;
+volatile int32_t Ki_scaled_q16;
 volatile int32_t Kd_q16;
+volatile int32_t adc_to_angle_mult_q16;
 
 // PID state variables (pure integer, Q8 fixed-point format)
 int32_t pid_error = 0;
-int32_t prev_error = 0;
 int32_t pid_integral = 0;
+int32_t prev_error = 0;
+
+volatile uint8_t pending_reply_cmd = 0;
+volatile uint32_t reply_trigger_time_ms = 0;
 int32_t pid_derivative = 0;
 
 // Motion target, trajectory profiling (Ghost Target) and feedback
@@ -65,7 +71,6 @@ volatile uint8_t status_reporting_enabled = 0;
 
 // Safety and Fault Management flags
 volatile uint8_t overcurrent_fault = 0;
-volatile uint8_t stall_fault = 0;
 volatile uint32_t overcurrent_ms = 0;
 volatile uint8_t motor_armed = 0; // Arm on first valid CONTROL packet
 volatile int32_t zero_current_offset_adc = 0; // Startup auto-zero calibration offset
@@ -73,7 +78,6 @@ volatile int32_t zero_current_offset_adc = 0; // Startup auto-zero calibration o
 
 
 void print_status(void);
-int32_t read_current_ma(void);
 void send_config_reply(void);
 
 // Flash Erase/Write Helper Functions
@@ -125,24 +129,32 @@ void flash_load_config(ServoConfig *cfg) {
         // Load default parameters
         cfg->servo_id = 0; // Default ID is 0 as explicitly requested!
         cfg->direction_invert = 0; // Default direction: normal (0)
-        cfg->min_angle = 45;
-        cfg->max_angle = 280;
+        cfg->min_angle = ANGLE_MIN;
+        cfg->max_angle = ANGLE_MAX;
         cfg->max_velocity = 180; // default 180 degrees/sec
         cfg->current_limit = 1000; // raw threshold/mA limit
         cfg->kp_q16 = 6553600;     // Kp = 100.0 * 65536
         cfg->ki_q16 = 3276;        // Ki = 0.05 * 65536 (unscaled)
         cfg->kd_q16 = 524288;      // Kd = 8.0 * 65536 (unscaled)
-        cfg->hard_min_angle = 0;   // Default 0 deg at ADC = 0
-        cfg->hard_max_angle = 300; // Default 300 deg at ADC = 4095
+        cfg->hard_min_angle = 0;   // Default 0 deg at hard_min_adc
+        cfg->hard_max_angle = 300; // Default 300 deg at hard_max_adc
+        cfg->hard_min_adc = 0;     // Default min ADC
+        cfg->hard_max_adc = 4095;  // Default max ADC
         cfg->magic = 0xDEADBEEF;
 
         // Persist default config to flash
         flash_write_config(cfg);
     }
+    
+    int32_t sweep = cfg->hard_max_angle - cfg->hard_min_angle;
+    int32_t adc_range = cfg->hard_max_adc - cfg->hard_min_adc;
+    if (adc_range <= 0) adc_range = 1;
+    adc_to_angle_mult_q16 = (sweep << 16) / adc_range;
 
     // Keep unscaled Q16 gains for high-precision dynamic scaling in PID loop
     Kp_q16 = cfg->kp_q16;
     Ki_q16 = cfg->ki_q16;
+    Ki_scaled_q16 = (cfg->ki_q16 * 16777) >> 24;
     Kd_q16 = cfg->kd_q16;
 }
 
@@ -179,6 +191,7 @@ void delay_ms(uint32_t ms) {
 
 // UART Half-Duplex Single-Wire Helper Functions
 void uart_enable_tx(void) {
+    USART_ITConfig(USART1, USART_IT_RXNE, DISABLE);
     USART_RxCmd(USART1, DISABLE);
     USART_TxCmd(USART1, ENABLE);
 }
@@ -187,6 +200,7 @@ void uart_enable_rx(void) {
     while (USART_GetFlagStatus(USART1, USART_FLAG_TC) == RESET);
     USART_TxCmd(USART1, DISABLE);
     USART_RxCmd(USART1, ENABLE);
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
 }
 
 void uart_init(void) {
@@ -212,6 +226,16 @@ void uart_init(void) {
     USART_InitStruct.USART_Mode       = USART_Mode_Rx; // Start listening initially
     USART_Init(USART1, &USART_InitStruct);
 
+    // Enable USART1 RX Interrupt
+    USART_ITConfig(USART1, USART_IT_RXNE, ENABLE);
+    
+    // Configure NVIC for USART1
+    NVIC_InitTypeDef NVIC_InitStruct;
+    NVIC_InitStruct.NVIC_IRQChannel = USART1_IRQn;
+    NVIC_InitStruct.NVIC_IRQChannelPriority = 1;
+    NVIC_InitStruct.NVIC_IRQChannelCmd = ENABLE;
+    NVIC_Init(&NVIC_InitStruct);
+
     USART_HalfDuplexCmd(USART1, ENABLE);
     USART_Cmd(USART1, ENABLE);
 }
@@ -219,12 +243,6 @@ void uart_init(void) {
 void uart_putchar_raw(char c) {
     while (USART_GetFlagStatus(USART1, USART_FLAG_TXE) == RESET);
     USART_SendData(USART1, (uint16_t)c);
-}
-
-void uart_putchar(char c) {
-    uart_enable_tx();
-    uart_putchar_raw(c);
-    uart_enable_rx();
 }
 
 void uart_print(const char *str) {
@@ -251,21 +269,6 @@ void uart_print_int(uint32_t val) {
         val /= 10;
     }
     uart_print(&buf[i + 1]);
-}
-
-void uart_print_float(float val) {
-    if (val < 0.0f) {
-        uart_print("-");
-        val = -val;
-    }
-    uint32_t integer_part = (uint32_t)val;
-    uint32_t fractional_part = (uint32_t)((val - (float)integer_part) * 100.0f + 0.5f);
-    uart_print_int(integer_part);
-    uart_print(".");
-    if (fractional_part < 10) {
-        uart_print("0");
-    }
-    uart_print_int(fractional_part);
 }
 
 // 1ms SysTick interrupts
@@ -309,7 +312,7 @@ void adc_init(void) {
     ADC_Cmd(ADC1, ENABLE);
 }
 
-uint16_t adc_read(uint8_t channel) {
+static inline uint16_t adc_read(uint8_t channel) {
     static uint8_t last_channel = 0xFF;
     
     ADC_AnyChannelNumCfg(ADC1, 0);
@@ -342,7 +345,7 @@ uint16_t adc_read(uint8_t channel) {
     return value;
 }
 
-int32_t read_current_ma(void) {
+static inline int32_t read_current_ma(void) {
     static int32_t filtered_current_q8 = -1;
     
     // Perform fast non-blocking analog conversion (filtered by EMA)
@@ -355,9 +358,9 @@ int32_t read_current_ma(void) {
     }
     
     // Scale standard integer calculation directly to Q8 format
-    // Math: current_ma_q8 = (corrected_raw * 3300 * 256) / 4095 = (corrected_raw * 844800) / 4095
-    // Cast to 64-bit integer before multiplying to prevent 32-bit arithmetic overflow!
-    int32_t current_ma_q8 = (int32_t)(((int64_t)corrected_raw * 844800) / 4095);
+    // Multiply by 845001 (which is 844800 * 4096 / 4095) and shift right by 12
+    // Use unsigned 32-bit multiply to avoid signed overflow, then cast back.
+    int32_t current_ma_q8 = (int32_t)(((uint32_t)corrected_raw * 845001U) >> 12);
     
     if (filtered_current_q8 < 0) {
         filtered_current_q8 = current_ma_q8;
@@ -366,13 +369,11 @@ int32_t read_current_ma(void) {
         filtered_current_q8 = (38 * current_ma_q8 + 218 * filtered_current_q8) >> 8;
     }
     
-    return filtered_current_q8 >> 8; // convert back to standard integer milliamps
+    return (filtered_current_q8 >> 8); // convert back to standard integer milliamps
 }
 
 // Transmit immediate status packet reply (echoing instruction)
 void send_status_reply(uint8_t echoed_instruction) {
-    // 1ms Turnaround delay to let master (RP2040) switch to RX mode and clear its echo buffer
-    delay_ms(1);
     
     uint8_t packet[11];
     packet[0] = 0xFF;
@@ -390,16 +391,13 @@ void send_status_reply(uint8_t echoed_instruction) {
     packet[7] = (uint8_t)(current_ma & 0xFF);
     packet[8] = (uint8_t)((current_ma >> 8) & 0xFF);
     
-    // Param 4: Status Flags (Bit 0: Moving, Bit 1: Over_Current, Bit 2: Stall)
+    // Param 4: Status Flags (Bit 0: Moving, Bit 1: Over_Current)
     uint8_t flags = 0;
     if (status_reporting_enabled) {
         flags |= (1 << 0);
     }
     if (overcurrent_fault) {
-        flags |= (1 << 1);
-    }
-    if (stall_fault) {
-        flags |= (1 << 2);
+        flags |= 0x02;
     }
     packet[9] = flags;
     
@@ -416,53 +414,46 @@ void send_status_reply(uint8_t echoed_instruction) {
 }
 
 void send_config_reply(void) {
-    // 1ms Turnaround delay to let master (RP2040) switch to RX mode and clear its echo buffer
-    delay_ms(1);
     
-    uint8_t packet[36];
+    uint8_t packet[40];
     packet[0] = 0xFF;
     packet[1] = 0xFF;
     packet[2] = config.servo_id;
-    packet[3] = 32; // Length: Instruction (1) + 30 Params + Checksum (1)
+    packet[3] = 36; // Length: Instruction (1) + 34 Params + Checksum (1)
     packet[4] = 0x05; // Echoed Instruction
     
-    // Copy the entire 30-byte config struct as parameters
+    // Copy the entire 34-byte config struct as parameters
     uint8_t *config_bytes = (uint8_t *)&config;
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 34; i++) {
         packet[5 + i] = config_bytes[i];
     }
     
     // Checksum: lower 8 bits of bitwise NOT of sum of ID to last parameter
     uint8_t sum = packet[2] + packet[3] + packet[4];
-    for (int i = 0; i < 30; i++) {
+    for (int i = 0; i < 34; i++) {
         sum += packet[5 + i];
     }
-    packet[35] = ~sum;
+    packet[39] = ~sum;
     
     // Transmit over shared single-wire bus
     uart_enable_tx();
-    for (int i = 0; i < 36; i++) {
+    for (int i = 0; i < 40; i++) {
         uart_putchar_raw((char)packet[i]);
     }
     uart_enable_rx();
 }
 
-// Non-blocking binary packet parser
-void process_packet_input(void) {
+// Non-blocking binary packet parser (Now driven by Hardware Interrupt!)
+void USART1_IRQHandler(void) {
     static RxState rx_state = RX_STATE_HEADER1;
     static uint8_t rx_id = 0;
     static uint8_t rx_length = 0;
     static uint8_t rx_instruction = 0;
-    static uint8_t rx_params[32];
+    static uint8_t rx_params[64];
     static uint8_t rx_param_count = 0;
     static uint8_t target_param_count = 0;
 
-    // Clear Overrun Error (ORE) if it occurred, preventing hard lockups
-    if (USART_GetFlagStatus(USART1, USART_FLAG_ORE) != RESET) {
-        USART_ReceiveData(USART1); 
-    }
-
-    if (USART_GetFlagStatus(USART1, USART_FLAG_RXNE) != RESET) {
+    if (USART_GetITStatus(USART1, USART_IT_RXNE) != RESET) {
         uint8_t c = (uint8_t)USART_ReceiveData(USART1);
 
         switch (rx_state) {
@@ -489,7 +480,7 @@ void process_packet_input(void) {
                 }
                 break;
             case RX_STATE_LENGTH:
-                if (c >= 2 && c <= 32) {
+                if (c >= 2 && c <= 64) {
                     rx_length = c;
                     rx_state = RX_STATE_INSTRUCTION;
                 } else {
@@ -524,7 +515,8 @@ void process_packet_input(void) {
                     if (calculated_checksum == rx_checksum) {
                         // 1. CONTROL Command
                         if (rx_instruction == 0x01) {
-                            if (!overcurrent_fault && !stall_fault) {
+                            // Ignore move command if currently faulted
+                            if (!overcurrent_fault) {
                                 uint16_t cmd_angle = rx_params[0] | (rx_params[1] << 8);
                                 uint16_t cmd_velocity = rx_params[2] | (rx_params[3] << 8);
                                 
@@ -537,7 +529,8 @@ void process_packet_input(void) {
                                 motor_armed = 1; // Arm motor upon first valid CONTROL command!
                             }
                             if (rx_id != 0xFE) {
-                                send_status_reply(0x01);
+                                pending_reply_cmd = 0x01;
+                                reply_trigger_time_ms = millis() + 2;
                             }
                         } 
                         // 2. CONFIG Command
@@ -568,6 +561,10 @@ void process_packet_input(void) {
                                 new_cfg.hard_min_angle = rx_params[22] | (rx_params[23] << 8);
                                 new_cfg.hard_max_angle = rx_params[24] | (rx_params[25] << 8);
                             }
+                            if (update_mask & (1 << 7)) {
+                                new_cfg.hard_min_adc = rx_params[26] | (rx_params[27] << 8);
+                                new_cfg.hard_max_adc = rx_params[28] | (rx_params[29] << 8);
+                            }
                             
                             // Bit 6: Volatile (RAM-only) update flag
                             if (!(update_mask & (1 << 6))) {
@@ -576,37 +573,48 @@ void process_packet_input(void) {
                             config = new_cfg;
                             Kp_q16 = config.kp_q16;
                             Ki_q16 = config.ki_q16;
+                            Ki_scaled_q16 = (config.ki_q16 * 16777) >> 24;
                             Kd_q16 = config.kd_q16;
                             
+                            int32_t sweep = config.hard_max_angle - config.hard_min_angle;
+                            int32_t adc_range = config.hard_max_adc - config.hard_min_adc;
+                            if (adc_range <= 0) adc_range = 1;
+                            adc_to_angle_mult_q16 = (sweep << 16) / adc_range;
+                            
                             if (rx_id != 0xFE) {
-                                send_status_reply(0x02);
+                                pending_reply_cmd = 0x02;
+                                reply_trigger_time_ms = millis() + 2;
                             }
                         } 
                         // 3. POLL_STATUS Command
                         else if (rx_instruction == 0x03) {
                             if (rx_id != 0xFE) {
-                                send_status_reply(0x03);
+                                pending_reply_cmd = 0x03;
+                                reply_trigger_time_ms = millis() + 2;
                             }
                         } 
                         // 4. CLEAR_ERROR Command
                         else if (rx_instruction == 0x04) {
-                            overcurrent_fault = 0;
-                            stall_fault = 0;
-                            overcurrent_ms = 0;
-                            pid_integral = 0;
-                            prev_error = 0;
-                            motor_armed = 0; // Disarm motor to allow manual shaft positioning!
-                            target_angle = current_angle;
-                            ghost_angle_q8 = current_angle << 8;
-                            
-                            if (rx_id != 0xFE) {
-                                send_status_reply(0x04);
+                            if (rx_params[0] == 1) { // 1 = Clear Error
+                                overcurrent_fault = 0;
+                                overcurrent_ms = 0;
+                                pid_integral = 0;
+                                prev_error = 0;
+                                motor_armed = 0; // Disarm motor to allow manual shaft positioning!
+                                target_angle = current_angle;
+                                ghost_angle_q8 = current_angle << 8;
+                                
+                                if (rx_id != 0xFE) {
+                                    pending_reply_cmd = 0x04;
+                                    reply_trigger_time_ms = millis() + 2;
+                                }
                             }
                         }
                         // 5. READ_CONFIG Command
                         else if (rx_instruction == 0x05) {
                             if (rx_id != 0xFE) {
-                                send_config_reply();
+                                pending_reply_cmd = 0x05;
+                                reply_trigger_time_ms = millis() + 2;
                             }
                         }
 
@@ -615,12 +623,15 @@ void process_packet_input(void) {
                 }
                 break;
         }
+    } else {
+        // Clear any stray error flags (ORE, NE, FE, PE) that could cause an infinite IRQ loop
+        (void)USART_ReceiveData(USART1);
     }
 }
 
 // PID Controller Loop
-void pid_update(uint32_t arr_period) {
-    if (overcurrent_fault || stall_fault) {
+static inline void pid_update(uint32_t arr_period) {
+    if (overcurrent_fault) {
         TIM_SetCompare3(TIM1, 0);
         TIM_SetCompare2(TIM1, 0);
         return;
@@ -665,7 +676,7 @@ void pid_update(uint32_t arr_period) {
     if (pid_integral > INTEGRAL_LIMIT_Q8) pid_integral = INTEGRAL_LIMIT_Q8;
     else if (pid_integral < -INTEGRAL_LIMIT_Q8) pid_integral = -INTEGRAL_LIMIT_Q8;
     
-    int64_t i_term = ((int64_t)Ki_q16 * (int64_t)pid_integral) / 1000;
+    int64_t i_term = (int64_t)Ki_scaled_q16 * (int64_t)pid_integral;
 
     pid_derivative = pid_error - prev_error;
     prev_error = pid_error;
@@ -700,7 +711,7 @@ void pid_update(uint32_t arr_period) {
 
 
 // 1ms Critical Task Loop (Trajectory Ramping, Protection Checks & State Machine)
-void one_ms_task(uint32_t arr_period) {
+static inline void one_ms_task(uint32_t arr_period) {
     // 1. Read potentiometer raw ADC and apply low pass filter (updates current_angle_q8 and current_angle)
     static int32_t filtered_adc_q8 = -1;
     uint16_t raw_adc = adc_read(ADC_Channel_7);
@@ -712,11 +723,12 @@ void one_ms_task(uint32_t arr_period) {
         filtered_adc_q8 = (26 * raw_adc_q8 + 230 * filtered_adc_q8) >> 8;
     }
 
-    int32_t sweep = config.hard_max_angle - config.hard_min_angle;
+    int32_t active_adc_q8 = filtered_adc_q8 - (config.hard_min_adc << 8);
+    
     if (config.direction_invert) {
-        current_angle_q8 = (config.hard_max_angle << 8) - (sweep * filtered_adc_q8) / 4095;
+        current_angle_q8 = (config.hard_max_angle << 8) - (int32_t)(((int64_t)active_adc_q8 * adc_to_angle_mult_q16) >> 16);
     } else {
-        current_angle_q8 = (sweep * filtered_adc_q8) / 4095 + (config.hard_min_angle << 8);
+        current_angle_q8 = (int32_t)(((int64_t)active_adc_q8 * adc_to_angle_mult_q16) >> 16) + (config.hard_min_angle << 8);
     }
     current_angle = (current_angle_q8 + 128) >> 8;
 
@@ -734,7 +746,8 @@ void one_ms_task(uint32_t arr_period) {
         overcurrent_ms = 0;
     }
 
-    if (overcurrent_fault || stall_fault) {
+    // 0. Safety Check
+    if (overcurrent_fault) {
         TIM_SetCompare3(TIM1, 0);
         TIM_SetCompare2(TIM1, 0);
         return;
@@ -742,6 +755,7 @@ void one_ms_task(uint32_t arr_period) {
 
     // 3. Normal trajectory ramping and PID execution
     ghost_angle_q8 = target_angle << 8;
+    
     pid_update(arr_period);
 }
 
@@ -803,7 +817,7 @@ int main(void) {
     TIM_OCInitTypeDef       TIM_OCInitStruct;
 
     // 1. Enable 1ms SysTick timekeeping interrupt
-    SysTick_Config(48000000U / 1000);
+    SysTick_Config(SystemCoreClock / 1000);
 
     // 2. Initialize Single-Wire Half-Duplex USART1 at 115200 Baud
     uart_init();
@@ -877,11 +891,16 @@ int main(void) {
     // 12. Soft Start: read current position to lock initial target securely
     uint16_t init_raw_adc = adc_read(ADC_Channel_7);
     int32_t sweep = config.hard_max_angle - config.hard_min_angle;
+    int32_t adc_range = config.hard_max_adc - config.hard_min_adc;
+    if (adc_range <= 0) adc_range = 1;
+    
+    int32_t init_active_adc = (int32_t)init_raw_adc - config.hard_min_adc;
     int32_t init_angle_q8;
+    
     if (config.direction_invert) {
-        init_angle_q8 = (config.hard_max_angle << 8) - (sweep * (int32_t)init_raw_adc * 256) / 4095;
+        init_angle_q8 = (config.hard_max_angle << 8) - (sweep * init_active_adc * 256) / adc_range;
     } else {
-        init_angle_q8 = (sweep * (int32_t)init_raw_adc * 256) / 4095 + (config.hard_min_angle << 8);
+        init_angle_q8 = (sweep * init_active_adc * 256) / adc_range + (config.hard_min_angle << 8);
     }
     current_angle_q8 = init_angle_q8;
     current_angle = (init_angle_q8 + 128) >> 8;
@@ -895,7 +914,7 @@ int main(void) {
     uart_print(" deg.\r\n");
 #endif
 
-    static uint32_t last_pid_time = 0;
+    uint32_t last_tick = ms_ticks;
 
     while (1) {
         // A. Software System Reset Trigger (Debounced reset button on PA5)
@@ -907,19 +926,22 @@ int main(void) {
             NVIC_SystemReset();
         }
 
-        // B. Process non-blocking packet bus parser
-        process_packet_input();
-
-        // C. Update Trajectory ramps, protections, and PID loop strictly every 1ms
-        if (millis() - last_pid_time >= PID_INTERVAL_MS) {
-            last_pid_time = millis();
-            one_ms_task(TimerPeriod);
+        // B. (UART RX is now handled asynchronously by USART1_IRQHandler)
+        
+        // C. Send asynchronous TX replies safely without blocking the CPU
+        if (pending_reply_cmd != 0 && millis() >= reply_trigger_time_ms) {
+            if (pending_reply_cmd == 0x05) {
+                send_config_reply();
+            } else {
+                send_status_reply(pending_reply_cmd);
+            }
+            pending_reply_cmd = 0;
         }
 
-        // D. Periodic logging disabled for production to keep single-wire bus clear.
-        // The master reads current and position via binary STATUS REPLY packets.
-
-        // E. Prevent cycle spinning overload
-        // (Removed delay_ms(1) to run at full speed and avoid UART overrun)
+        // D. Update Trajectory ramps, protections, and PID loop strictly every 1ms
+        if (ms_ticks != last_tick) {
+            last_tick = ms_ticks;
+            one_ms_task(TimerPeriod);
+        }
     }
 }
