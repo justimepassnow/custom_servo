@@ -93,28 +93,29 @@ if config_data:
     print("  - Max Velocity:    {}°/sec".format(config_data.max_velocity))
     print("  - Current Limit:   {} mA".format(config_data.current_limit))
     print("  - Tuning PID:      Kp={:.2f}, Ki={:.4f}, Kd={:.2f}".format(config_data.kp, config_data.ki, config_data.kd))
-    print("  - Physical Limits: {}° to {}°".format(config_data.hard_min_angle, config_data.hard_max_angle))
-    print("  - ADC Limits:      {} to {}".format(config_data.hard_min_adc, config_data.hard_max_adc))
+    print("  - Calibration:     zero_adc={}, adc_per_360={}".format(config_data.zero_adc, config_data.adc_per_360))
     print("  - Magic Word:      {:#X}".format(config_data.magic))
 else:
     print("⚠️ Could not read configuration from flash writing new configs!")
     servo.configure(
     servo_id=1,
-    min_angle=10,
+    min_angle=0,
     max_angle=200,
     max_velocity=180,
     current_limit=1000)
 
 
-servo.configure(max_velocity=90)
+
 print("Clearing any active or startup safety faults...")
-clear_status = servo.clear_error()
+servo.clear_error()
+time.sleep(0.1)
+clear_status = servo.poll()
 if clear_status:
     print("✅ Faults cleared successfully. Current State: Overcurrent={}".format(
         clear_status.overcurrent
     ))
 else:
-    print("⚠️ Clear error command sent, but no reply received.")
+    print("⚠️ Could not reach servo to verify fault status.")
 
 # ─── 5. Step 3: Interactive Tracking Loop ─────────────────────────────────────
 print("\n--- STEP 3: Interactive Tracking Loop ---")
@@ -145,11 +146,8 @@ try:
             continue
 
         print("Commanding target angle {}°...".format(target_angle))
-        status = servo.move(target_angle, velocity=target_velocity)
+        servo.move(target_angle, velocity=target_velocity)
         
-        if status is None:
-            print("❌ Servo is not responding to move command!")
-            continue
             
         # Poll until the target angle is reached
         print("Moving and polling telemetry...")

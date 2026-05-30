@@ -37,10 +37,8 @@ typedef struct __attribute__((packed)) {
     int32_t  kp_q16;          // PID proportional gain
     int32_t  ki_q16;          // PID integral gain
     int32_t  kd_q16;          // PID derivative gain
-    uint16_t hard_min_angle;  // physical degree angle at hard_min_adc (default: 0)
-    uint16_t hard_max_angle;  // physical degree angle at hard_max_adc (default: 300)
-    uint16_t hard_min_adc;    // raw ADC value corresponding to hard_min_angle (default: 0)
-    uint16_t hard_max_adc;    // raw ADC value corresponding to hard_max_angle (default: 4095)
+    int16_t  zero_adc;        // raw ADC value at exactly 0 degrees
+    int16_t  adc_per_360;     // number of ADC ticks for 360 degree rotation (signed)
     uint32_t magic;           // 0xDEADBEEF Magic Word
 } ServoConfig;
 
@@ -138,20 +136,16 @@ void flash_load_config(ServoConfig *cfg) {
         cfg->kp_q16 = 6553600;     // Kp = 100.0 * 65536
         cfg->ki_q16 = 3276;        // Ki = 0.05 * 65536 (unscaled)
         cfg->kd_q16 = 524288;      // Kd = 8.0 * 65536 (unscaled)
-        cfg->hard_min_angle = 0;   // Default 0 deg at hard_min_adc
-        cfg->hard_max_angle = 300; // Default 300 deg at hard_max_adc
-        cfg->hard_min_adc = 0;     // Default min ADC
-        cfg->hard_max_adc = 4095;  // Default max ADC
+        cfg->zero_adc = 0;         // Default 0
+        cfg->adc_per_360 = 4914;   // Default 4914 (approx 4095 * 360 / 300)
         cfg->magic = 0xDEADBEEF;
 
         // Persist default config to flash
         flash_write_config(cfg);
     }
     
-    int32_t sweep = cfg->hard_max_angle - cfg->hard_min_angle;
-    int32_t adc_range = cfg->hard_max_adc - cfg->hard_min_adc;
-    if (adc_range <= 0) adc_range = 1;
-    adc_to_angle_mult_q16 = (sweep << 16) / adc_range;
+    if (cfg->adc_per_360 == 0) cfg->adc_per_360 = 1;
+    adc_to_angle_mult_q16 = (360 << 16) / cfg->adc_per_360;
 
     // Keep unscaled Q16 gains for high-precision dynamic scaling in PID loop
     Kp_q16 = cfg->kp_q16;
@@ -308,10 +302,11 @@ void adc_init(void) {
     // 3. Configure sampling time for fast and safe settling (14.5 + 12.5 = 27 cycles @ 8MHz = 3.3us)
     ADC_SampleTimeConfig(ADC1, ADC_SampleTime_14_5);
 
-    // 4. Configure PA7 and PA2 as Analog Inputs (AIN)
+    // 4. Configure PA7, PA4, and PA2 as Analog Inputs (AIN)
+    // Note: PA4 is tied to PA7 on the PCB. We set PA4 to AIN to safely disable its digital buffer.
     RCC_AHBPeriphClockCmd(RCC_AHBPERIPH_GPIOA, ENABLE);
     GPIO_StructInit(&GPIO_InitStruct);
-    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7 | GPIO_Pin_2; // PA7 = Potentiometer, PA2 = Current Sensor
+    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_7 | GPIO_Pin_4 | GPIO_Pin_2;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AIN;
     GPIO_Init(GPIOA, &GPIO_InitStruct);
@@ -359,16 +354,16 @@ static inline int32_t read_current_ma(void) {
     // Perform fast non-blocking analog conversion (filtered by EMA)
     uint16_t raw_adc = adc_read(ADC_Channel_5); // PA2 maps to ADC1_VIN[5]
     
-    // Apply baseline offset calibration
+    // Apply baseline offset calibration (removed the aggressive -80 clamp)
     int32_t corrected_raw = (int32_t)raw_adc - zero_current_offset_adc;
     if (corrected_raw < 0) {
         corrected_raw = 0; // Prevent negative current draw readings
     }
     
     // Scale standard integer calculation directly to Q8 format
-    // Multiply by 845001 (which is 844800 * 4096 / 4095) and shift right by 12
+    // Multiplier derived from Test 2 data (440401) to best-fit the linear curve
     // Use unsigned 32-bit multiply to avoid signed overflow, then cast back.
-    int32_t current_ma_q8 = (int32_t)(((uint32_t)corrected_raw * 845001U) >> 12);
+    int32_t current_ma_q8 = (int32_t)(((uint32_t)corrected_raw * 440401U) >> 12);
     
     if (filtered_current_q8 < 0) {
         filtered_current_q8 = current_ma_q8;
@@ -423,29 +418,29 @@ void send_status_reply(uint8_t echoed_instruction) {
 
 void send_config_reply(void) {
     
-    uint8_t packet[40];
+    uint8_t packet[36];
     packet[0] = 0xFF;
     packet[1] = 0xFF;
     packet[2] = config.servo_id;
-    packet[3] = 36; // Length: Instruction (1) + 34 Params + Checksum (1)
+    packet[3] = 32; // Length: Instruction (1) + 30 Params + Checksum (1)
     packet[4] = 0x05; // Echoed Instruction
     
-    // Copy the entire 34-byte config struct as parameters
+    // Copy the entire 30-byte config struct as parameters
     uint8_t *config_bytes = (uint8_t *)&config;
-    for (int i = 0; i < 34; i++) {
+    for (int i = 0; i < 30; i++) {
         packet[5 + i] = config_bytes[i];
     }
     
     // Checksum: lower 8 bits of bitwise NOT of sum of ID to last parameter
     uint8_t sum = packet[2] + packet[3] + packet[4];
-    for (int i = 0; i < 34; i++) {
+    for (int i = 0; i < 30; i++) {
         sum += packet[5 + i];
     }
-    packet[39] = ~sum;
+    packet[35] = ~sum;
     
     // Transmit over shared single-wire bus
     uart_enable_tx();
-    for (int i = 0; i < 40; i++) {
+    for (int i = 0; i < 36; i++) {
         uart_putchar_raw((char)packet[i]);
     }
     uart_enable_rx();
@@ -544,10 +539,11 @@ void USART1_IRQHandler(void) {
                                 status_reporting_enabled = 1;
                                 motor_armed = 1; // Arm motor upon first valid CONTROL command!
                             }
-                            if (rx_id != 0xFE) {
-                                pending_reply_cmd = 0x01;
-                                reply_trigger_time_ms = millis() + 2;
-                            }
+                            // Reply removed to speed up control loop
+                            // if (rx_id != 0xFE) {
+                            //     pending_reply_cmd = 0x01;
+                            //     reply_trigger_time_ms = millis() + 2;
+                            // }
                         } 
                         // 2. CONFIG Command
                         else if (rx_instruction == 0x02) {
@@ -574,12 +570,8 @@ void USART1_IRQHandler(void) {
                                 new_cfg.kd_q16 = rx_params[18] | (rx_params[19] << 8) | (rx_params[20] << 16) | (rx_params[21] << 24);
                             }
                             if (update_mask & (1 << 5)) {
-                                new_cfg.hard_min_angle = rx_params[22] | (rx_params[23] << 8);
-                                new_cfg.hard_max_angle = rx_params[24] | (rx_params[25] << 8);
-                            }
-                            if (update_mask & (1 << 7)) {
-                                new_cfg.hard_min_adc = rx_params[26] | (rx_params[27] << 8);
-                                new_cfg.hard_max_adc = rx_params[28] | (rx_params[29] << 8);
+                                new_cfg.zero_adc = rx_params[22] | (rx_params[23] << 8);
+                                new_cfg.adc_per_360 = rx_params[24] | (rx_params[25] << 8);
                             }
                             
                             // Bit 6: Volatile (RAM-only) update flag
@@ -592,10 +584,8 @@ void USART1_IRQHandler(void) {
                             Ki_scaled_q16 = (config.ki_q16 * 16777) >> 24;
                             Kd_q16 = config.kd_q16;
                             
-                            int32_t sweep = config.hard_max_angle - config.hard_min_angle;
-                            int32_t adc_range = config.hard_max_adc - config.hard_min_adc;
-                            if (adc_range <= 0) adc_range = 1;
-                            adc_to_angle_mult_q16 = (sweep << 16) / adc_range;
+                            if (config.adc_per_360 == 0) config.adc_per_360 = 1;
+                            adc_to_angle_mult_q16 = (360 << 16) / config.adc_per_360;
                             
                             if (rx_id != 0xFE) {
                                 pending_reply_cmd = 0x02;
@@ -620,10 +610,11 @@ void USART1_IRQHandler(void) {
                                 target_angle = current_angle;
                                 ghost_angle_q8 = current_angle << 8;
                                 
-                                if (rx_id != 0xFE) {
-                                    pending_reply_cmd = 0x04;
-                                    reply_trigger_time_ms = millis() + 2;
-                                }
+                                // Reply removed to speed up control loop
+                                // if (rx_id != 0xFE) {
+                                //     pending_reply_cmd = 0x04;
+                                //     reply_trigger_time_ms = millis() + 2;
+                                // }
                             }
                         }
                         // 5. READ_CONFIG Command
@@ -739,13 +730,8 @@ static inline void one_ms_task(uint32_t arr_period) {
         filtered_adc_q8 = (26 * raw_adc_q8 + 230 * filtered_adc_q8) >> 8;
     }
 
-    int32_t active_adc_q8 = filtered_adc_q8 - (config.hard_min_adc << 8);
-    
-    if (config.direction_invert) {
-        current_angle_q8 = (config.hard_max_angle << 8) - (int32_t)(((int64_t)active_adc_q8 * adc_to_angle_mult_q16) >> 16);
-    } else {
-        current_angle_q8 = (int32_t)(((int64_t)active_adc_q8 * adc_to_angle_mult_q16) >> 16) + (config.hard_min_angle << 8);
-    }
+    int32_t active_adc_q8 = filtered_adc_q8 - (config.zero_adc << 8);
+    current_angle_q8 = (int32_t)(((int64_t)active_adc_q8 * adc_to_angle_mult_q16) >> 16);
     current_angle = (current_angle_q8 + 128) >> 8;
 
     // 2. Over-Current Protection
@@ -907,11 +893,11 @@ int main(void) {
     GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_AF_PP;
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
-    // 9. Configure Software Reset button on PA5
+    // 9. Configure Software Reset button on PA0
     GPIO_StructInit(&GPIO_InitStruct);
-    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_5;
+    GPIO_InitStruct.GPIO_Pin   = GPIO_Pin_0;
     GPIO_InitStruct.GPIO_Speed = GPIO_Speed_High;
-    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IPU;
+    GPIO_InitStruct.GPIO_Mode  = GPIO_Mode_IPU; // Input Pull-Up
     GPIO_Init(GPIOA, &GPIO_InitStruct);
 
     // 10. Initialize ADC on PA7 and PA2
@@ -926,18 +912,9 @@ int main(void) {
 
     // 12. Soft Start: read current position to lock initial target securely
     uint16_t init_raw_adc = adc_read(ADC_Channel_7);
-    int32_t sweep = config.hard_max_angle - config.hard_min_angle;
-    int32_t adc_range = config.hard_max_adc - config.hard_min_adc;
-    if (adc_range <= 0) adc_range = 1;
+    int32_t init_active_adc_q8 = ((int32_t)init_raw_adc - config.zero_adc) << 8;
+    int32_t init_angle_q8 = (int32_t)(((int64_t)init_active_adc_q8 * adc_to_angle_mult_q16) >> 16);
     
-    int32_t init_active_adc = (int32_t)init_raw_adc - config.hard_min_adc;
-    int32_t init_angle_q8;
-    
-    if (config.direction_invert) {
-        init_angle_q8 = (config.hard_max_angle << 8) - (sweep * init_active_adc * 256) / adc_range;
-    } else {
-        init_angle_q8 = (sweep * init_active_adc * 256) / adc_range + (config.hard_min_angle << 8);
-    }
     current_angle_q8 = init_angle_q8;
     current_angle = (init_angle_q8 + 128) >> 8;
     target_angle = current_angle;
@@ -954,16 +931,14 @@ int main(void) {
     SysTick_Config(SystemCoreClock / 1000);
 
     while (1) {
-        // A. Software System Reset Trigger (Debounced reset button on PA5)
-        if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_5) == Bit_RESET) {
+        // A. Software System Reset Trigger (Debounced reset button on PA0)
+        if (GPIO_ReadInputDataBit(GPIOA, GPIO_Pin_0) == Bit_RESET) {
 #if DEBUG_LOG
-            uart_print("\r\n[RESET] Triggering Software Reset...\r\n");
+            uart_print("\r\n[RESET] Triggering Software Reset via PA0...\r\n");
 #endif
             delay_ms(50);
             NVIC_SystemReset();
         }
-
-        // B. (UART RX is now handled asynchronously by USART1_IRQHandler)
         
         // C. Send asynchronous TX replies safely without blocking the CPU
         if (pending_reply_cmd != 0 && millis() >= reply_trigger_time_ms) {

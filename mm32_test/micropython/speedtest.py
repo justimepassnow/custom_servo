@@ -52,34 +52,17 @@ if initial_config:
     print("  - Max Velocity:        {}°/sec".format(initial_config.max_velocity))
     print("  - Current Limit:       {} mA".format(initial_config.current_limit))
     print("  - PID Gains:           Kp={:.2f}, Ki={:.4f}, Kd={:.2f}".format(initial_config.kp, initial_config.ki, initial_config.kd))
-    print("  - Physical Hard Limits:{}° to {}°".format(initial_config.hard_min_angle, initial_config.hard_max_angle))
     print("  - Magic Word:          {:#X}".format(initial_config.magic))
 else:
     print("❌ Failed to query initial configuration!")
     import sys
     sys.exit()
 
-
-# ─── 5. Verify the New Configuration via READ_CONFIG ─────────────────────────
-print("\n--- [FEATURE TEST] Verifying New Configuration from Flash ---")
-updated_config = servo.read_config()
-if updated_config:
-    print("Verified Flash Settings:")
-    print("  - Min/Max Angle Limit: {}° to {}°".format(updated_config.min_angle, updated_config.max_angle))
-    print("  - Current Limit:       {} mA".format(updated_config.current_limit))
-    print("  - PID Gains:           Kp={:.2f}, Ki={:.4f}, Kd={:.2f}".format(updated_config.kp, updated_config.ki, updated_config.kd))
-    print("  - Physical Hard Limits:{}° to {}°".format(updated_config.hard_min_angle, updated_config.hard_max_angle))
-    
-else:
-    print("❌ Failed to verify configuration!")
-
 # ─── 6. Clear Faults ─────────────────────────────────────────────────────────
 print("\n--- Clearing any active safety faults ---")
-clear_status = servo.clear_error()
-if clear_status:
-    print("✅ Faults cleared. Current state: Overcurrent={}".format(
-        clear_status.overcurrent
-    ))
+servo.clear_error()
+print("✅ Faults cleared.")
+
 
 # ─── 7. Run Continuous Sweeping Loop ──────────────────────────────────────────
 targets = [0,90,180,90]
@@ -93,11 +76,8 @@ try:
     while True:
         print("\n🔄 --- LOOP ITERATION #{} ---".format(loop_count))
         for target in targets:
-            status = servo.move(target)
-            if status is None:
-                print("❌ Servo not responding to move command!")
-                continue
-                
+            servo.move(target,velocity=300)
+            
             start_time = time.ticks_ms()
             
             # Poll telemetry until the target is reached

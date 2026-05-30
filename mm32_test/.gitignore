@@ -3,5 +3,26 @@
 .vscode/c_cpp_properties.json
 .vscode/launch.json
 .vscode/ipch
-implementation_plan.md
-byteorder.md
+
+
+# KiCad temporary files and backups
+*-bak
+*.bak
+*.bck
+*-backups/
+*.kicad_sch-bak
+*.kicad_pcb-bak
+fp-info-cache
+# User-specific GUI settings
+*.kicad_prl
+
+# Output files (Gerbers, Drill files, BOMs, PDFs)
+# It's better to generate these fresh than track them
+gerbers/
+outputs/
+*.gbr
+*.drl
+*.csv
+*.pdf
+*.xml
+*.pos

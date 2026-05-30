@@ -33,7 +33,7 @@ _INST_CLEAR_ERR  = 0x04
 _INST_READ_CONFIG = 0x05
 
 _STATUS_REPLY_LEN = 11  # Total bytes in a status reply packet
-_CONFIG_REPLY_LEN = 40  # Total bytes in a configuration reply packet
+_CONFIG_REPLY_LEN = 36  # Total bytes in a configuration reply packet
 
 # CONFIG update mask bits
 _MASK_ID_DIR     = 1 << 0
@@ -43,7 +43,6 @@ _MASK_CURRENT    = 1 << 3
 _MASK_PID        = 1 << 4
 _MASK_HARD_CAL   = 1 << 5
 _MASK_RAM_ONLY   = 1 << 6
-_MASK_HARD_ADC   = 1 << 7
 
 # Reply timeout (ms) — generous for slow single-wire turnaround
 _REPLY_TIMEOUT_MS = 100
@@ -90,11 +89,11 @@ class ServoConfigData:
 
     __slots__ = ('servo_id', 'direction_invert', 'min_angle', 'max_angle',
                  'max_velocity', 'current_limit', 'kp', 'ki', 'kd',
-                 'hard_min_angle', 'hard_max_angle', 'hard_min_adc', 'hard_max_adc', 'magic')
+                 'zero_adc', 'adc_per_360', 'magic')
 
     def __init__(self, servo_id, direction_invert, min_angle, max_angle,
                  max_velocity, current_limit, kp_q16, ki_q16, kd_q16,
-                 hard_min_angle, hard_max_angle, hard_min_adc, hard_max_adc, magic):
+                 zero_adc, adc_per_360, magic):
         self.servo_id         = servo_id
         self.direction_invert = bool(direction_invert)
         self.min_angle        = min_angle
@@ -104,20 +103,18 @@ class ServoConfigData:
         self.kp               = _q16_to_float(kp_q16)
         self.ki               = _q16_to_float(ki_q16)
         self.kd               = _q16_to_float(kd_q16)
-        self.hard_min_angle   = hard_min_angle
-        self.hard_max_angle   = hard_max_angle
-        self.hard_min_adc     = hard_min_adc
-        self.hard_max_adc     = hard_max_adc
+        self.zero_adc         = zero_adc
+        self.adc_per_360      = adc_per_360
         self.magic            = magic
 
     def __repr__(self):
         return (
             "<ServoConfigData id={} dir_invert={} limits={}°-{}° "
-            "max_vel={} current_lim={}mA kp={:.2f} ki={:.4f} kd={:.2f} hard_limits={}°-{}° (ADC: {}-{}) magic={:#X}>"
+            "max_vel={} current_lim={}mA kp={:.2f} ki={:.4f} kd={:.2f} zero_adc={} adc_per_360={} magic={:#X}>"
         ).format(
             self.servo_id, self.direction_invert, self.min_angle, self.max_angle,
             self.max_velocity, self.current_limit, self.kp, self.ki, self.kd,
-            self.hard_min_angle, self.hard_max_angle, self.hard_min_adc, self.hard_max_adc, self.magic
+            self.zero_adc, self.adc_per_360, self.magic
         )
 
 
@@ -135,17 +132,17 @@ def _parse_config_reply(raw):
     length = raw[3]
     inst  = raw[4]
 
-    if length != 36:  # instruction (1) + params (34) + checksum (1)
+    if length != 32:  # instruction (1) + params (30) + checksum (1)
         return None
 
-    # Verify checksum (bytes 2..38 -> checksum at byte 39)
-    expected = _checksum(raw[2:39])
-    if raw[39] != expected:
+    # Verify checksum (bytes 2..34 -> checksum at byte 35)
+    expected = _checksum(raw[2:35])
+    if raw[35] != expected:
         return None
 
-    # Unpack the 34 parameter bytes
-    params = raw[5:39]
-    unpacked = struct.unpack('<BBHHHHiiiHHHHI', params)
+    # Unpack the 30 parameter bytes
+    params = raw[5:35]
+    unpacked = struct.unpack('<BBHHHHiiihhI', params)
     
     return ServoConfigData(*unpacked)
 
@@ -436,12 +433,13 @@ class Servo:
 
         Returns
         -------
-        ServoStatus or None
-            Status reply from the servo (None on timeout).
+        None
+            No reply is expected to speed up the loop.
         """
         params = _pack_u16_le(int(angle)) + _pack_u16_le(int(velocity))
         pkt = _build_packet(self._id, _INST_CONTROL, params)
-        return self._bus._transact(pkt, expect_reply=True)
+        self._bus._transact(pkt, expect_reply=False)
+        return None
 
     # ── POLL_STATUS (0x03) ───────────────────────────────────────────────
 
@@ -466,10 +464,11 @@ class Servo:
 
         Returns
         -------
-        ServoStatus or None
+        None
         """
         pkt = _build_packet(self._id, _INST_CLEAR_ERR)
-        return self._bus._transact(pkt, expect_reply=True)
+        self._bus._transact(pkt, expect_reply=False)
+        return None
 
     # ── READ_CONFIG (0x05) ───────────────────────────────────────────────
 
@@ -491,20 +490,20 @@ class Servo:
     # are always sent (fixed-length packet), with zeros in the unused slots.
     # The firmware only reads the fields whose mask bits are set.
 
-    def _send_config(self, mask, params_29):
+    def _send_config(self, mask, params_25):
         """
-        Send a CONFIG packet with the given update mask and 29-byte parameter payload.
-        The firmware reads rx_params[0] as the mask and rx_params[1..29] as the
-        config fields — exactly 29 data bytes after the mask.
+        Send a CONFIG packet with the given update mask and 25-byte parameter payload.
+        The firmware reads rx_params[0] as the mask and rx_params[1..25] as the
+        config fields — exactly 25 data bytes after the mask.
         """
-        assert len(params_29) == 29, "CONFIG params must be exactly 29 bytes"
-        full_params = bytes([mask]) + params_29
+        assert len(params_25) == 25, "CONFIG params must be exactly 25 bytes"
+        full_params = bytes([mask]) + params_25
         pkt = _build_packet(self._id, _INST_CONFIG, full_params)
         return self._bus._transact(pkt, expect_reply=(self._id != _BROADCAST_ID))
 
     def _blank_params(self):
-        """Return a mutable 29-byte zeroed parameter buffer."""
-        return bytearray(29)
+        """Return a mutable 25-byte zeroed parameter buffer."""
+        return bytearray(25)
 
     def set_id(self, new_id, direction_invert=False):
         """
@@ -609,42 +608,26 @@ class Servo:
         struct.pack_into('<i', p, 17, _float_to_q16(kd))
         return self._send_config(mask, bytes(p))
 
-    def set_hard_calibration(self, hard_min=0, hard_max=300):
+    def set_calibration(self, zero_adc, adc_per_360):
         """
-        Set the physical angle calibration endpoints.
+        Set the physical ADC calibration.
 
         Parameters
         ----------
-        hard_min : int
-            Physical angle in degrees corresponding to hard_min_adc.
-        hard_max : int
-            Physical angle in degrees corresponding to hard_max_adc.
+        zero_adc : int
+            Raw ADC value corresponding to 0 degrees.
+        adc_per_360 : int
+            Number of ADC ticks for 360 degree rotation.
         """
         p = self._blank_params()
-        struct.pack_into('<HH', p, 21, int(hard_min), int(hard_max))
+        struct.pack_into('<hh', p, 21, int(zero_adc), int(adc_per_360))
         return self._send_config(_MASK_HARD_CAL, bytes(p))
-
-    def set_hard_adc(self, hard_min_adc=0, hard_max_adc=4095):
-        """
-        Set the physical ADC calibration endpoints.
-
-        Parameters
-        ----------
-        hard_min_adc : int
-            ADC value corresponding to hard_min_angle.
-        hard_max_adc : int
-            ADC value corresponding to hard_max_angle.
-        """
-        p = self._blank_params()
-        struct.pack_into('<HH', p, 25, int(hard_min_adc), int(hard_max_adc))
-        return self._send_config(_MASK_HARD_ADC, bytes(p))
 
     def configure(self, servo_id=None, direction_invert=None,
                   min_angle=None, max_angle=None,
                   max_velocity=None, current_limit=None,
                   kp=None, ki=None, kd=None,
-                  hard_min=None, hard_max=None, 
-                  hard_min_adc=None, hard_max_adc=None, ram_only=False):
+                  zero_adc=None, adc_per_360=None, ram_only=False):
         """
         Update multiple configuration fields in a single CONFIG packet.
         Only the provided (non-None) fields are written; all others are
@@ -707,15 +690,10 @@ class Servo:
             struct.pack_into('<i', p, 13, _float_to_q16(ki if ki is not None else 0.05))
             struct.pack_into('<i', p, 17, _float_to_q16(kd if kd is not None else 8.0))
 
-        # Bit 5 — Hard calibration (must provide both)
-        if hard_min is not None and hard_max is not None:
+        # Bit 5 — Calibration (must provide both)
+        if zero_adc is not None and adc_per_360 is not None:
             mask |= _MASK_HARD_CAL
-            struct.pack_into('<HH', p, 21, int(hard_min), int(hard_max))
-            
-        # Bit 7 - Hard ADC calibration (must provide both)
-        if hard_min_adc is not None and hard_max_adc is not None:
-            mask |= _MASK_HARD_ADC
-            struct.pack_into('<HH', p, 25, int(hard_min_adc), int(hard_max_adc))
+            struct.pack_into('<hh', p, 21, int(zero_adc), int(adc_per_360))
             
         if ram_only:
             mask |= _MASK_RAM_ONLY
